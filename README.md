@@ -1,8 +1,9 @@
 <div align="center">
 
-# COCO
+# 〚 COCO 〛
 
 ### Claude Orchestrating Cheaper Agents
+$\color{#00a896}{\textit{C}}$<b><i>laude</i></b> ♾️ $\color{#00a896}{\textit{O}}$<b><i>penCode</i></b> ♾️ $\color{#00a896}{\textit{C}}$<b><i>odex</i></b> ♾️ $\color{#00a896}{\textit{O}}$<b><i>llama</i></b> <sub>(+ Antigravity)</sub>
 $\color{#00a896}{\textit{C}}$<b><i>laude</i></b> ♾️ $\color{#00a896}{\textit{O}}$<b><i>penCode</i></b> ♾️ $\color{#00a896}{\textit{C}}$<b><i>odex</i></b> ♾️ $\color{#00a896}{\textit{A}}$<b><i>ntigravity</i></b>
 
 **Claude plans. Cheaper agents do the heavy lifting. You watch every task, and every credit, live.**
@@ -24,7 +25,7 @@ $\color{#00a896}{\textit{C}}$<b><i>laude</i></b> ♾️ $\color{#00a896}{\textit
 
 Claude is the best planner and reviewer you have, and also the most expensive. Most of what it spends tokens on isn't judgment. It's reading 30 web pages, scanning a log file or writing boilerplate.
 
-**COCO turns Claude Code into a manager.** Claude splits the work, sends each piece to the agent best suited to it, and gets back a **short summary** instead of the raw pages. The tokens burned on the heavy work go to cheaper or free models: your ChatGPT plan (Codex), your Google plan (Antigravity), free cloud models (OpenCode), or a model running on your own GPU (Ollama).
+**〚 COCO 〛 turns Claude Code into a manager.** Claude splits the work, sends each piece to the agent best suited to it, and gets back a **short summary** instead of the raw pages. The tokens burned on the heavy work go to cheaper or free models: your ChatGPT plan (Codex), your Google plan (Antigravity), free cloud models (OpenCode), or a model running on your own GPU (Ollama).
 
 ## Features
 
