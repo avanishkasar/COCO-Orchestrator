@@ -3,6 +3,7 @@
 # COCO
 
 ### Claude Orchestrating Cheaper Agents
+$\color{#00a896}{\textit{C}}$<b><i>laude</i></b> ♾️ $\color{#00a896}{\textit{O}}$<b><i>penCode</i></b> ♾️ $\color{#00a896}{\textit{C}}$<b><i>odex</i></b> ♾️ $\color{#00a896}{\textit{A}}$<b><i>ntigravity</i></b>
 
 **Claude plans. Cheaper agents do the heavy lifting. You watch every task, and every credit, live.**
 
