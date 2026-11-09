@@ -160,9 +160,10 @@ def open_tab(title, color, command):
     if os.name != "nt" or not wt: return
     shell = shutil.which("pwsh.exe") or "powershell.exe"
     try:
+        env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "COCO_WORKER")}
         subprocess.Popen([wt, "-w", "coco", "new-tab", "--title", title, "--tabColor", color,
                           "--suppressApplicationTitle", shell, "-NoLogo", "-NoExit", "-Command", command],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     except Exception:
         pass
 
@@ -261,12 +262,27 @@ def guard_loop():
             else:
                 idle_since = idle_since or time.time()
                 if time.time() - idle_since > 30: break
-            time.sleep(3)
+            time.sleep(4)
     finally:
         try:
             if GUARD_PID.read_text() == str(os.getpid()): GUARD_PID.unlink()
         except Exception:
             pass
+
+
+def cmd_statusline():
+    """Claude Code status line: save the session JSON (incl. real rate limits) for the dashboard, print a short line."""
+    raw = sys.stdin.read()
+    try:
+        d = json.loads(raw)
+        (HOME / "claude_status.json").write_text(raw, encoding="utf-8")
+    except Exception:
+        return print("COCO")
+    parts = [f"COCO · {d.get('model', {}).get('display_name', 'Claude')}"]
+    for key, lab in (("five_hour", "5h"), ("seven_day", "wk")):
+        w = (d.get("rate_limits") or {}).get(key) or {}
+        if w.get("used_percentage") is not None: parts.append(f"{lab} {100 - float(w['used_percentage']):.0f}% left")
+    print(" · ".join(parts))
 
 
 def cmd_guard(a):
@@ -650,6 +666,7 @@ def main():
     sp.add_parser("doctor", help="send a tiny real task to every agent")
     sp.add_parser("credits", help="Claude usage ($) vs work done by workers")
     sp.add_parser("dash", help="animated live terminal dashboard")
+    sp.add_parser("statusline", help="Claude Code status line hook (captures real rate limits)")
     g = sp.add_parser("guard", help="keep the dashboard open while Claude sessions run: on | off | status")
     g.add_argument("action", nargs="?", default="status", choices=["on", "off", "status", "run"])
     a = ap.parse_args()
@@ -660,6 +677,8 @@ def main():
         sys.exit("COCO: you are a worker agent. Do the task yourself instead of delegating.")
     if a.cmd == "guard":
         return cmd_guard(a)
+    if a.cmd == "statusline":
+        return cmd_statusline()
     if a.cmd == "dash":
         import tui
         return tui.run(HOME)

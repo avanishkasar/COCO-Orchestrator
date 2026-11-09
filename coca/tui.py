@@ -15,7 +15,8 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 
-FPS = 14
+FPS = 14          # while agents work
+IDLE_FPS = 3      # nothing running: keep the CPU quiet
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ORB = "◐◓◑◒"
 COL = {"claude": "#ff8a4c", "codex": "#19c37d", "opencode": "#ffb020", "agy": "#4c8dff",
@@ -178,6 +179,8 @@ def agents_online():
 
 # ───────────────────────── state ─────────────────────────
 class State:
+    limits = None
+
     def __init__(self):
         self.feed = deque(maxlen=400)
         self.packets, self.sparks = [], []
@@ -523,8 +526,65 @@ class Credits:
         for a, v in ws["by_agent"].items():
             ba.append("■ ", style=COL.get(a, "#888")); ba.append(f"{a} {cm.fmt_tok(v['tok'])}  ", style="#8fa0c0")
         if ws["by_agent"]: rows.append(ba)
-        rows.append(Text(f"$ = API list price · main model {c['main_model']}", style="italic #4a5470", no_wrap=True, overflow="ellipsis"))
         yield Group(*rows)
+
+
+class Limits:
+    def __init__(self, st): self.st = st
+
+    def __rich_console__(self, console, options):
+        rows = limit_rows(self.st.limits)
+        yield Group(*rows) if rows else Text("no live limit data yet", style="italic #566079")
+
+
+def _bar(pct, n=8):
+    full = int(round(min(100, max(0, pct)) / 100 * n))
+    col = "#19c37d" if pct < 60 else "#ffb020" if pct < 85 else "#ff5470"
+    return Text("█" * full, style=col) + Text("░" * (n - full), style="#2c3449")
+
+
+def _ago(t):
+    s = time.time() - t
+    return "now" if s < 90 else f"{s / 60:.0f}m ago" if s < 5400 else f"{s / 3600:.0f}h ago"
+
+
+def _reset(ts):
+    if not ts: return ""
+    try: ts = float(ts)
+    except (TypeError, ValueError):
+        try: ts = dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+        except ValueError: return ""
+    s = ts - time.time()
+    return "" if s <= 0 else f"↻{s / 60:.0f}m" if s < 5400 else f"↻{s / 3600:.0f}h" if s < 172800 else f"↻{s / 86400:.0f}d"
+
+
+def limit_rows(L):
+    """Usage left per agent, only where a real live source exists."""
+    out = []
+    lab = {300: "5h", 10080: "wk"}
+    for agent, name in (("claude", "Claude"), ("codex", "Codex")):
+        d = (L or {}).get(agent)
+        if not d: continue
+        r = Text(no_wrap=True, overflow="ellipsis")
+        r.append(f"{name:<7}", style=f"bold {COL[agent]}")
+        r.append(f"{_ago(d['asof'])} ", style="italic #4a5470") if time.time() - d["asof"] > 90 else None
+        for mins, pct, rs in d["windows"]:
+            r.append(f"{lab.get(mins, f'{mins}m')} ")
+            try: passed = rs and float(rs) < time.time()
+            except (TypeError, ValueError): passed = False
+            if passed:
+                r.append("reset ✓  ", style="#19c37d"); continue
+            r.append_text(_bar(pct, 6))
+            r.append(f" {100 - pct:.0f}% left {_reset(rs)}  ", style="#c4cde0")
+        out.append(r)
+    o = (L or {}).get("ollama")
+    if o is not None:
+        r = Text(no_wrap=True, overflow="ellipsis")
+        r.append(f"{'Ollama':<7}", style=f"bold {COL['ollama']}")
+        r.append("local, no quota · ", style="#8fa0c0")
+        r.append(", ".join(f"{n} {v / 2**30:.1f}GB VRAM" for n, v in o["loaded"]) or "no model loaded", style="#c4cde0")
+        out.append(r)
+    return out
 
 
 def build_layout(w, h):
@@ -533,18 +593,19 @@ def build_layout(w, h):
     if w >= 110 and h >= 28:                          # full
         foot = 11 if h >= 34 else 9
         lay.split_column(Layout(name="head", size=3), Layout(name="body", ratio=1), Layout(name="foot", size=foot))
-        lay["body"].split_row(Layout(name="net", ratio=3), Layout(name="feed", ratio=2))
+        lay["body"].split_row(Layout(name="net", ratio=3), Layout(name="right", ratio=2))
+        lay["right"].split_column(Layout(name="feed", ratio=1), Layout(name="limits", size=5))
         lay["foot"].split_row(Layout(name="tasks", ratio=5), Layout(name="credits", minimum_size=44, ratio=3), Layout(name="board", ratio=4))
-        return lay, {"head", "net", "feed", "tasks", "credits", "board"}
+        return lay, {"head", "net", "feed", "limits", "tasks", "credits", "board"}
     if w >= 76 and h >= 22:                           # medium: no blackboard
         body = Layout(name="body", ratio=1) if w >= 96 else Layout(name="feed", ratio=1)
-        lay.split_column(Layout(name="head", size=3), body, Layout(name="foot", size=9))
+        lay.split_column(Layout(name="head", size=3), body, Layout(name="limits", size=5), Layout(name="foot", size=9))
         if w >= 96:
             lay["body"].split_row(Layout(name="net", ratio=1), Layout(name="feed", ratio=1)); names = {"net", "feed"}
         else:
             names = {"feed"}
         lay["foot"].split_row(Layout(name="tasks", ratio=1), Layout(name="credits", size=42))
-        return lay, names | {"head", "tasks", "credits"}
+        return lay, names | {"head", "limits", "tasks", "credits"}
     # narrow / short: stack what fits
     parts, names = [Layout(name="head", size=3)], {"head"}
     if h >= 34:
@@ -554,6 +615,8 @@ def build_layout(w, h):
         parts.append(Layout(name="tasks", size=7)); names.add("tasks")
     if h >= 26:
         parts.append(Layout(name="credits", size=9)); names.add("credits")
+    if h >= 31:
+        parts.append(Layout(name="limits", size=5)); names.add("limits")
     lay.split_column(*parts)
     return lay, names
 
@@ -567,12 +630,13 @@ def run(home: Path):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import credits as cm
-    console = Console()
+    os.environ.pop("NO_COLOR", None)
+    console = Console(force_terminal=True, color_system="truecolor")
     tail, st = Tail(home), State()
     st.board = tail.board_lines()
     hb = home / "dash.heartbeat"
     size, lay, show = None, None, set()
-    net, feed, tasks, board, cred = Network(st), Feed(st), Tasks(st), Board(st), Credits(st)
+    net, feed, tasks, board, cred, lim = Network(st), Feed(st), Tasks(st), Board(st), Credits(st), Limits(st)
     last_poll = last_tasks = last_online = 0
     last_ctrl_c = [0.0]
 
@@ -595,11 +659,19 @@ def run(home: Path):
             except Exception as ex: st.notice = (f"credits error: {ex}", time.time() + 5)
             time.sleep(15)
 
+    def limits_loop():
+        import limits as lm
+        while True:
+            try: st.limits = lm.compute(home)
+            except Exception: pass
+            time.sleep(20)
+
     def online_loop():
         while True:
             st.online = agents_online(); time.sleep(20)
     threading.Thread(target=credits_loop, daemon=True).start()
     threading.Thread(target=online_loop, daemon=True).start()
+    threading.Thread(target=limits_loop, daemon=True).start()
     try:
         console.set_window_title("COCO — Claude + workers")
     except Exception:
@@ -631,12 +703,14 @@ def run(home: Path):
                         f"[{COL[w]}]●[/] {w}" if st.online.get(w) else f"[#3a4258]○ {w}[/]" for w in WORKERS)),
                     "feed": lambda: panel(feed, f"LIVE ACTIVITY  [#566079]{len(st.feed)} events[/]"),
                     "tasks": lambda: panel(tasks, "TASKS"),
-                    "credits": lambda: panel(cred, "CREDITS  [#566079]real tokens[/]", "#5a4a2a"),
+                    "credits": lambda: panel(cred, "CREDITS  [#566079]real tokens · $ at API list price[/]", "#5a4a2a"),
+                    "limits": lambda: panel(lim, "USAGE LEFT  [#566079]live, real sources only[/]", "#2f4a3a"),
                     "board": lambda: panel(board, f"SHARED BLACKBOARD  [#566079]{len(st.board)}[/]"),
                 }
                 for name in show:
                     lay[name].update(ups[name]())
                 live.refresh()
-                time.sleep(1 / FPS)
+                busy = st.packets or any(t["state"] == "running" for t in st.tasks)
+                time.sleep(1 / FPS if busy else 1 / IDLE_FPS)
     except KeyboardInterrupt:
         pass
