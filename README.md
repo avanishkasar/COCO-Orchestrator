@@ -133,9 +133,10 @@ Subscription plans don't bill per token, so dollar amounts are API-equivalent va
 - **Live activity**: every search, page fetch, command, edit and line of reasoning from every agent, as it happens.
 - **Tasks**: progress bars, durations, the model used, real token counts and fallback chains (`opencode✖→codex`).
 - **Credits**: Claude's spend today and since install, worker tokens, net saved and offload share.
+- **Usage left**: Claude's 5-hour and weekly limits (from Claude Code's status line), Codex's rate limits (from its session logs) and what Ollama has loaded in VRAM. Agents with no real source (OpenCode free models, Antigravity) are not shown rather than guessed.
 - **Shared blackboard**: findings the agents have shared with each other.
 
-It won't close by accident. Ctrl+C is ignored while workers are running, and if the window is closed mid-task it reopens within a few seconds.
+It won't close by accident. Ctrl+C is ignored while workers are running, and while any Claude Code session is open a small guard reopens it within seconds (`coco guard off` to pause). It resizes to any window size and drops to 3 fps when idle, so it stays light on CPU.
 
 ## Configuration
 

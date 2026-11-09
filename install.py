@@ -69,6 +69,8 @@ def main():
         cmd = f"python {AB} up"
         if not any(h.get("command") == cmd for g in hooks for h in g.get("hooks", [])):
             hooks.append({"hooks": [{"type": "command", "command": cmd, "async": True, "timeout": 90}]})
+        if "statusLine" not in s:   # feeds Claude's real 5h/weekly limits to the dashboard
+            s["statusLine"] = {"type": "command", "command": f"python {AB} statusline"}
         write(sp, json.dumps(s, indent=2) + "\n", a.dry_run)
 
     # 4. `coco` command in ~/.local/bin (add it to PATH if it isn't)
