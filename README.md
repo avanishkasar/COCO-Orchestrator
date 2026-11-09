@@ -1,6 +1,6 @@
 <div align="center">
 
-# C.O.C.A
+# 〚 C.O.C.A 〛
 
 ### Claude Orchestrating Cheaper Agents
 
