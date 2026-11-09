@@ -1,6 +1,6 @@
 <div align="center">
 
-# C.O.C.A
+# COCO
 
 ### Claude Orchestrating Cheaper Agents
 
@@ -11,7 +11,7 @@
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-skill%20%2B%20hook-ff8a4c.svg)
 ![Agents](https://img.shields.io/badge/workers-Codex%20·%20Antigravity%20·%20OpenCode%20·%20Ollama-5ee6ff.svg)
 
-<img src="docs/dashboard.svg" alt="C.O.C.A live terminal dashboard" width="100%">
+<img src="docs/dashboard.svg" alt="COCO live terminal dashboard" width="100%">
 
 <sub>A real frame from the dashboard: four agents ran one job in parallel, and the credits panel counts real tokens.</sub>
 
@@ -23,7 +23,7 @@
 
 Claude is the best planner and reviewer you have, and also the most expensive. Most of what it spends tokens on isn't judgment. It's reading 30 web pages, scanning a log file or writing boilerplate.
 
-**C.O.C.A turns Claude Code into a manager.** Claude splits the work, sends each piece to the agent best suited to it, and gets back a **short summary** instead of the raw pages. The tokens burned on the heavy work go to cheaper or free models: your ChatGPT plan (Codex), your Google plan (Antigravity), free cloud models (OpenCode), or a model running on your own GPU (Ollama).
+**COCO turns Claude Code into a manager.** Claude splits the work, sends each piece to the agent best suited to it, and gets back a **short summary** instead of the raw pages. The tokens burned on the heavy work go to cheaper or free models: your ChatGPT plan (Codex), your Google plan (Antigravity), free cloud models (OpenCode), or a model running on your own GPU (Ollama).
 
 ## Features
 
@@ -90,16 +90,16 @@ These defaults come from testing, not guesswork. For example, Codex gave the mos
 
 Sign in to each one once (`codex`, `agy`, `opencode`) and pull a model for Ollama (`ollama pull qwen3:8b`).
 
-**2. Install C.O.C.A into Claude Code**
+**2. Install COCO into Claude Code**
 
 ```bash
-git clone https://github.com/avanishkasar/C.O.C.A-Orchestrator.git
-cd C.O.C.A-Orchestrator
+git clone https://github.com/avanishkasar/COCO-Orchestrator.git
+cd COCO-Orchestrator
 python install.py          # skill + CLAUDE.md rule + allow rule + session-start hook (backs up every file it touches)
 python coca/ab.py doctor   # sends a tiny real task to every agent
 ```
 
-That's it. Open Claude Code, give it a research-heavy task, and watch the dashboard.
+That's it. In Claude Code or Codex just say **"use coco"**, or give it a research-heavy task, and watch the dashboard. From any shell: `coco run research "…"`.
 
 ## Commands
 
@@ -145,15 +145,15 @@ It won't close by accident. Ctrl+C is ignored while workers are running, and if 
 | `AB_DASH=0` | Don't auto-open the dashboard. |
 | `AB_TABS=1` | Also open a raw output tab for each worker. |
 | `AGENTBUS_HOME` | Move the data folder (default `~/.agentbus`). |
-| `OLLAMA_MODELS` | Read when Ollama is auto-started. If a running Ollama can't see this folder, C.O.C.A restarts it with the right path. |
+| `OLLAMA_MODELS` | Read when Ollama is auto-started. If a running Ollama can't see this folder, COCO restarts it with the right path. |
 
 ## Related projects
 
-Others are exploring multi-agent CLI orchestration too, including [Orchestra Code](https://github.com/crossben/orchestra-code), [Ariadne](https://github.com/haha-systems/ariadne), [ai-dispatch](https://github.com/agent-tools-org/ai-dispatch), [Hydra](https://github.com/krowxx/hydra) and [agent-orchestrator](https://github.com/willynikes2/agent-orchestrator). C.O.C.A's angle is the combination: **Claude stays the planner inside Claude Code**, every task type has a tested best-fit agent with fallback, everything is visible in a live dashboard, and the savings are **measured from real token counts**.
+Others are exploring multi-agent CLI orchestration too, including [Orchestra Code](https://github.com/crossben/orchestra-code), [Ariadne](https://github.com/haha-systems/ariadne), [ai-dispatch](https://github.com/agent-tools-org/ai-dispatch), [Hydra](https://github.com/krowxx/hydra) and [agent-orchestrator](https://github.com/willynikes2/agent-orchestrator). COCO's angle is the combination: **Claude stays the planner inside Claude Code**, every task type has a tested best-fit agent with fallback, everything is visible in a live dashboard, and the savings are **measured from real token counts**.
 
 ## Built with itself
 
-The research behind this README was done by C.O.C.A. In one parallel job, **Codex** researched comparable projects, **OpenCode** read each vendor's install page, **Antigravity** read the source and wrote the architecture summary, and the local **Ollama** model drafted taglines. Claude only planned the job and edited the results.
+The research behind this README was done by COCO. In one parallel job, **Codex** researched comparable projects, **OpenCode** read each vendor's install page, **Antigravity** read the source and wrote the architecture summary, and the local **Ollama** model drafted taglines. Claude only planned the job and edited the results.
 
 ## Roadmap
 

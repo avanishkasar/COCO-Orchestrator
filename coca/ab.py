@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agentbus (ab): Claude's dispatcher for cheaper worker agents.
+"""COCO (Claude Orchestrating Cheaper Agents): Claude's dispatcher for cheaper worker agents.
 
 Claude stays the planner/reviewer. Workers do the token-heavy work:
   codex     (ChatGPT plan)          research, code, review
@@ -160,7 +160,7 @@ def open_tab(title, color, command):
     if os.name != "nt" or not wt: return
     shell = shutil.which("pwsh.exe") or "powershell.exe"
     try:
-        subprocess.Popen([wt, "-w", "agentbus", "new-tab", "--title", title, "--tabColor", color,
+        subprocess.Popen([wt, "-w", "coco", "new-tab", "--title", title, "--tabColor", color,
                           "--suppressApplicationTitle", shell, "-NoLogo", "-NoExit", "-Command", command],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
@@ -173,7 +173,7 @@ def ensure_dashboard():
         if hb.exists() and time.time() - hb.stat().st_mtime < 5:
             return False
         hb.write_text(str(time.time()))
-        open_tab("agentbus", "#ff8a4c", f"python '{Path(__file__).resolve()}' dash")
+        open_tab("COCO", "#ff8a4c", f"python '{Path(__file__).resolve()}' dash")
         time.sleep(1.5)
         return True
 
@@ -203,12 +203,89 @@ class Watchdog:
             time.sleep(3)
 
 
+# ───────────────────────── guard: dashboard lives as long as a Claude session ─────────────────────────
+GUARD_PID, GUARD_OFF = HOME / "guard.pid", HOME / "guard.off"
+
+
+def host_sessions():
+    """Interactive Claude Code / Codex CLI sessions (not the desktop apps, not COCO's own workers)."""
+    try:
+        import psutil
+    except ImportError:
+        return 1
+    n = 0
+    for p in psutil.process_iter(["name", "exe", "cmdline"]):
+        try:
+            name = (p.info["name"] or "").lower()
+            exe = (p.info["exe"] or "").lower()
+            cmd = " ".join(p.info["cmdline"] or []).lower()
+            if name in ("claude.exe", "claude") and "windowsapps" not in exe and "--type=" not in cmd:
+                n += 1
+            elif name in ("codex.exe", "codex") and not any(k in cmd for k in (" exec", "app-server", "mcp")):
+                n += 1
+        except Exception:
+            continue
+    return n
+
+
+def guard_alive():
+    try:
+        import psutil
+        pid = int(GUARD_PID.read_text())
+        return psutil.pid_exists(pid) and "python" in psutil.Process(pid).name().lower()
+    except Exception:
+        return False
+
+
+def start_guard():
+    if guard_alive() or not DASH: return False
+    py = Path(sys.executable)
+    pyw = py.with_name("pythonw.exe")
+    exe = str(pyw if os.name == "nt" and pyw.exists() else py)
+    kw = {"creationflags": NO_WINDOW | DETACHED | NEW_GROUP} if os.name == "nt" else {"start_new_session": True}
+    subprocess.Popen([exe, str(Path(__file__).resolve()), "guard", "run"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+    return True
+
+
+def guard_loop():
+    """Keep the dashboard open while any Claude Code session runs; exit 30 s after the last one ends."""
+    GUARD_PID.write_text(str(os.getpid()))
+    idle_since = None
+    try:
+        while True:
+            if host_sessions() > 0:
+                idle_since = None
+                if not GUARD_OFF.exists() and ensure_dashboard():
+                    emit({"ev": "service", "name": "dashboard", "state": "reopened"})
+            else:
+                idle_since = idle_since or time.time()
+                if time.time() - idle_since > 30: break
+            time.sleep(3)
+    finally:
+        try:
+            if GUARD_PID.read_text() == str(os.getpid()): GUARD_PID.unlink()
+        except Exception:
+            pass
+
+
+def cmd_guard(a):
+    if a.action == "run": return guard_loop()
+    if a.action == "off":
+        GUARD_OFF.write_text("1"); return print("guard: paused (dashboard may be closed). `coco guard on` to resume.")
+    if a.action == "on":
+        GUARD_OFF.unlink(missing_ok=True); start_guard(); return print("guard: on")
+    print(f"guard: {'running' if guard_alive() else 'stopped'}{' (paused)' if GUARD_OFF.exists() else ''}, "
+          f"claude/codex sessions: {host_sessions()}")
+
+
 # ───────────────────────── prompts / board ─────────────────────────
 def wrap_prompt(role, task, tid):
     HOME.mkdir(parents=True, exist_ok=True)
     BOARD.touch(exist_ok=True)
     board = "\n".join(BOARD.read_text(encoding="utf-8").splitlines()[-40:]) or "(empty)"
-    return f"""{ROLE_HINT[role]}
+    return f"""You are a COCO worker agent. Do this task yourself; never call coco or ab.py to delegate it.
+{ROLE_HINT[role]}
 
 SHARED BLACKBOARD (recent findings from other agents on this team; use if relevant):
 {board}
@@ -271,7 +348,7 @@ def run_cli(cmd, prompt, cwd, timeout, stdin=True, transform=None, model=""):
     st = {"final": [], "usage": CTX.usage, "buf": ""}
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         encoding="utf-8", errors="replace", cwd=cwd)
+                         encoding="utf-8", errors="replace", cwd=cwd, env={**os.environ, "COCO_WORKER": "1"})
     bufs = {"out": [], "err": []}
 
     def pump(stream, key):
@@ -532,6 +609,7 @@ def cmd_models(a):
 
 def cmd_up(a):
     print("dashboard :", "opened" if ensure_dashboard() else "already open")
+    print("guard     :", "started" if start_guard() else ("running" if guard_alive() else "off (AB_DASH=0)"))
     tags = ensure_ollama()
     print("ollama    :", "DOWN" if tags is None else f"up, models={tags}")
     for ag in ("codex", "agy", "opencode"):
@@ -549,7 +627,7 @@ def cmd_doctor(a):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="ab", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="coco", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     r = sp.add_parser("run", help="run one task")
     r.add_argument("role", choices=ROUTES)
@@ -572,10 +650,16 @@ def main():
     sp.add_parser("doctor", help="send a tiny real task to every agent")
     sp.add_parser("credits", help="Claude usage ($) vs work done by workers")
     sp.add_parser("dash", help="animated live terminal dashboard")
+    g = sp.add_parser("guard", help="keep the dashboard open while Claude sessions run: on | off | status")
+    g.add_argument("action", nargs="?", default="status", choices=["on", "off", "status", "run"])
     a = ap.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     HOME.mkdir(parents=True, exist_ok=True)
 
+    if a.cmd in ("run", "par") and os.environ.get("COCO_WORKER"):
+        sys.exit("COCO: you are a worker agent. Do the task yourself instead of delegating.")
+    if a.cmd == "guard":
+        return cmd_guard(a)
     if a.cmd == "dash":
         import tui
         return tui.run(HOME)

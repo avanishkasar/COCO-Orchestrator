@@ -1,4 +1,4 @@
-"""Animated full-screen terminal dashboard for agentbus  (`ab.py dash`).
+"""COCO: animated full-screen terminal dashboard  (`coco dash`).
 
 Shows the agent network with packets flying between Claude, the workers and the shared
 blackboard, a live activity log of exactly what each agent is doing, task progress, and the
@@ -271,7 +271,7 @@ class Network:
     def __init__(self, st: State): self.st = st
 
     def __rich_console__(self, console, options):
-        w, h = options.max_width, max(14, (options.height or 22))
+        w, h = options.max_width, max(10, (options.height or 22))
         st, now, f = self.st, time.time(), self.st.frame
         ch = [[" "] * w for _ in range(h)]
         sty = [[None] * w for _ in range(h)]
@@ -464,17 +464,18 @@ class Board:
         yield Group(*rows) if rows else Text("Nothing shared yet.", style="italic #566079")
 
 
-def header(st):
+def header(st, wide=True):
     f = st.frame
     real = st.tasks
     run = [t for t in st.all_tasks() if t["state"] == "running"]
     done = [t for t in real if t["state"] == "done"]
-    t = Text()
+    t = Text(no_wrap=True, overflow="ellipsis")
     t.append(f" {ORB[(f // 3) % 4]} ", style="bold #ff8a4c")
     grad = ["#ff8a4c", "#ffb020", "#19c37d", "#5ee6ff", "#4c8dff", "#b06cff"]
-    for i, c in enumerate("A G E N T B U S"):
+    for i, c in enumerate("C O C O"):
         t.append(c, style=f"bold {grad[(i // 2 + f // 4) % len(grad)]}")
     t.append("  ")
+    if wide: t.append("Claude orchestrating cheaper agents  ", style="#566079")
     t.append(" ● LIVE " if f % 14 < 10 else "   LIVE ", style="bold #19c37d")
     cr = st.credits
     stats = [("running", len(run), "#ffffff"), ("done", len(done), "#19c37d"),
@@ -505,9 +506,10 @@ class Credits:
         tot = lambda r: r["in"] + r["out"] + r.get("cw", 0) + r["cr"]
         def row(label, a, b, sa="#d6dcea", sb="#d6dcea"):
             r = Text(no_wrap=True, overflow="ellipsis")
-            r.append(f"{label:<14}", style="#8a93ab"); r.append(f"{a:>17}", style=sa); r.append(f"{b:>17}", style=sb)
+            r.append(f"{label:<14}", style="#8a93ab"); r.append(f"{a:>{cw}}", style=sa); r.append(f"{b:>{cw}}", style=sb)
             return r
-        hdr = Text(no_wrap=True); hdr.append(f"{'':<14}{'TODAY':>17}{'SINCE START':>17}", style="bold #6b7590")
+        cw = max(9, min(17, (options.max_width - 14) // 2))
+        hdr = Text(no_wrap=True); hdr.append(f"{'':<14}{'TODAY':>{cw}}{('SINCE START' if cw > 11 else 'TOTAL'):>{cw}}", style="bold #6b7590")
         share = lambda s, b: f"{100 * s / (s + b):.0f}%" if s + b > 0 else "—"
         rows = [
             hdr,
@@ -525,12 +527,35 @@ class Credits:
         yield Group(*rows)
 
 
-def build_layout():
+def build_layout(w, h):
+    """Pick a layout for the current terminal size. Returns (layout, visible panel names)."""
     lay = Layout()
-    lay.split_column(Layout(name="head", size=3), Layout(name="body", ratio=1), Layout(name="foot", size=11))
-    lay["body"].split_row(Layout(name="net", ratio=3), Layout(name="feed", ratio=2))
-    lay["foot"].split_row(Layout(name="tasks", ratio=5), Layout(name="credits", minimum_size=52, ratio=3), Layout(name="board", ratio=4))
-    return lay
+    if w >= 110 and h >= 28:                          # full
+        foot = 11 if h >= 34 else 9
+        lay.split_column(Layout(name="head", size=3), Layout(name="body", ratio=1), Layout(name="foot", size=foot))
+        lay["body"].split_row(Layout(name="net", ratio=3), Layout(name="feed", ratio=2))
+        lay["foot"].split_row(Layout(name="tasks", ratio=5), Layout(name="credits", minimum_size=44, ratio=3), Layout(name="board", ratio=4))
+        return lay, {"head", "net", "feed", "tasks", "credits", "board"}
+    if w >= 76 and h >= 22:                           # medium: no blackboard
+        body = Layout(name="body", ratio=1) if w >= 96 else Layout(name="feed", ratio=1)
+        lay.split_column(Layout(name="head", size=3), body, Layout(name="foot", size=9))
+        if w >= 96:
+            lay["body"].split_row(Layout(name="net", ratio=1), Layout(name="feed", ratio=1)); names = {"net", "feed"}
+        else:
+            names = {"feed"}
+        lay["foot"].split_row(Layout(name="tasks", ratio=1), Layout(name="credits", size=42))
+        return lay, names | {"head", "tasks", "credits"}
+    # narrow / short: stack what fits
+    parts, names = [Layout(name="head", size=3)], {"head"}
+    if h >= 34:
+        parts.append(Layout(name="net", ratio=2)); names.add("net")
+    parts.append(Layout(name="feed", ratio=3, minimum_size=4)); names.add("feed")
+    if h >= 18:
+        parts.append(Layout(name="tasks", size=7)); names.add("tasks")
+    if h >= 26:
+        parts.append(Layout(name="credits", size=9)); names.add("credits")
+    lay.split_column(*parts)
+    return lay, names
 
 
 def panel(r, title, color="#3b4563"):
@@ -546,7 +571,7 @@ def run(home: Path):
     tail, st = Tail(home), State()
     st.board = tail.board_lines()
     hb = home / "dash.heartbeat"
-    lay = build_layout()
+    size, lay, show = None, None, set()
     net, feed, tasks, board, cred = Network(st), Feed(st), Tasks(st), Board(st), Credits(st)
     last_poll = last_tasks = last_online = 0
     last_ctrl_c = [0.0]
@@ -576,10 +601,12 @@ def run(home: Path):
     threading.Thread(target=credits_loop, daemon=True).start()
     threading.Thread(target=online_loop, daemon=True).start()
     try:
-        console.set_window_title("agentbus — Claude + workers")
+        console.set_window_title("COCO — Claude + workers")
     except Exception:
         pass
     try:
+        size = (console.size.width, console.size.height)
+        lay, show = build_layout(*size)
         with Live(lay, console=console, screen=True, auto_refresh=False, transient=True) as live:
             while True:
                 now = time.time()
@@ -592,13 +619,23 @@ def run(home: Path):
                 if now - last_tasks > 1:
                     st.tasks = tail.tasks()[-60:]
                     last_tasks = now
-                lay["head"].update(Panel(header(st), box=box.HEAVY, border_style="#2c3449", padding=(0, 0)))
-                lay["net"].update(panel(net, "AGENT NETWORK  " + "  ".join(
-                    f"[{COL[w]}]●[/] {w}" if st.online.get(w) else f"[#3a4258]○ {w}[/]" for w in WORKERS)))
-                lay["feed"].update(panel(feed, f"LIVE ACTIVITY  [#566079]{len(st.feed)} events[/]"))
-                lay["tasks"].update(panel(tasks, "TASKS"))
-                lay["credits"].update(panel(cred, "CREDITS  [#566079]real token counts[/]", "#5a4a2a"))
-                lay["board"].update(panel(board, f"SHARED BLACKBOARD  [#566079]{len(st.board)}[/]"))
+                cur = (console.size.width, console.size.height)
+                if cur != size:                       # terminal resized: re-flow the panels
+                    size = cur
+                    lay, show = build_layout(*size)
+                    live.update(lay)
+                    console.clear()
+                ups = {
+                    "head": lambda: Panel(header(st, size[0] >= 120), box=box.HEAVY, border_style="#2c3449", padding=(0, 0)),
+                    "net": lambda: panel(net, "AGENT NETWORK  " + "  ".join(
+                        f"[{COL[w]}]●[/] {w}" if st.online.get(w) else f"[#3a4258]○ {w}[/]" for w in WORKERS)),
+                    "feed": lambda: panel(feed, f"LIVE ACTIVITY  [#566079]{len(st.feed)} events[/]"),
+                    "tasks": lambda: panel(tasks, "TASKS"),
+                    "credits": lambda: panel(cred, "CREDITS  [#566079]real tokens[/]", "#5a4a2a"),
+                    "board": lambda: panel(board, f"SHARED BLACKBOARD  [#566079]{len(st.board)}[/]"),
+                }
+                for name in show:
+                    lay[name].update(ups[name]())
                 live.refresh()
                 time.sleep(1 / FPS)
     except KeyboardInterrupt:

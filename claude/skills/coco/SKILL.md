@@ -1,9 +1,9 @@
 ---
-name: delegate
-description: Offload token-heavy work (web research, browsing URLs, bulk/boilerplate coding, code review, summarising large files, simple rewrites) to cheaper worker agents (codex, Antigravity agy, opencode free models, local ollama) via the agentbus dispatcher, so Claude spends fewer credits. Use proactively whenever a subtask is self-contained and doesn't need Claude-level judgment.
+name: coco
+description: COCO (Claude Orchestrating Cheaper Agents). Use whenever the user says "use coco" or mentions COCO, and proactively to Offload token-heavy work (web research, browsing URLs, bulk/boilerplate coding, code review, summarising large files, simple rewrites) to cheaper worker agents (codex, Antigravity agy, opencode free models, local ollama) via the agentbus dispatcher, so Claude spends fewer credits. Use proactively whenever a subtask is self-contained and doesn't need Claude-level judgment.
 ---
 
-# Delegate to worker agents (agentbus)
+# COCO: delegate to worker agents
 
 Claude = planner + reviewer. Workers do the heavy lifting. Only the worker's short SUMMARY comes back into context.
 
@@ -38,5 +38,5 @@ agy is slow (1–3 min); in tests codex gave the most precise reviews and resear
 - Verify: for `code`, check `git diff --stat` and run the tests yourself; spot-check research claims that matter.
 - Don't `show` full output unless the summary is insufficient; that defeats the purpose.
 - Workers must never push, publish, post, or touch credentials. Say so in the task if relevant.
-- The dashboard auto-opens (Windows Terminal window "agentbus"; elsewhere run `ab.py dash`), reopens while tasks run, and ollama auto-starts honouring OLLAMA_MODELS.
+- The dashboard (Windows Terminal window "agentbus") auto-opens, auto-reopens while tasks run, and ollama auto-starts with the D:\DevCache model folder.
 

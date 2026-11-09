@@ -42,8 +42,9 @@ def main():
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")])
 
     # 1. delegate skill
-    skill = (ROOT / "claude/skills/delegate/SKILL.md").read_text(encoding="utf-8").replace("{AB}", AB)
-    write(CLAUDE / "skills/delegate/SKILL.md", skill, a.dry_run)
+    skill = (ROOT / "claude/skills/coco/SKILL.md").read_text(encoding="utf-8").replace("{AB}", AB)
+    for d in (CLAUDE / "skills/coco", Path.home() / ".codex/skills/coco", Path.home() / ".agents/skills/coco"):
+        write(d / "SKILL.md", skill, a.dry_run)   # Claude Code, Codex, and other agents that read ~/.agents/skills
 
     # 2. global CLAUDE.md rule (replaced in place on re-install)
     snippet = (ROOT / "claude/CLAUDE.md").read_text(encoding="utf-8").replace("{AB}", AB).strip()
@@ -62,15 +63,20 @@ def main():
         s = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
         allow = s.setdefault("permissions", {}).setdefault("allow", [])
         for tool in ("Bash", "PowerShell"):
-            rule = f"{tool}(python {AB} *)"
-            if rule not in allow: allow.append(rule)
+            for rule in (f"{tool}(python {AB} *)", f"{tool}(coco *)"):
+                if rule not in allow: allow.append(rule)
         hooks = s.setdefault("hooks", {}).setdefault("SessionStart", [])
         cmd = f"python {AB} up"
         if not any(h.get("command") == cmd for g in hooks for h in g.get("hooks", [])):
             hooks.append({"hooks": [{"type": "command", "command": cmd, "async": True, "timeout": 90}]})
         write(sp, json.dumps(s, indent=2) + "\n", a.dry_run)
 
-    print(f"\nDone. Dispatcher: python {AB}\nNext: python {AB} doctor   (sends a tiny real task to every agent)")
+    # 4. `coco` command in ~/.local/bin (add it to PATH if it isn't)
+    b = Path.home() / ".local/bin"
+    write(b / "coco.cmd", f'@echo off\npython "{AB}" %*\n', a.dry_run)
+    write(b / "coco", f'#!/bin/sh\nexec python "{AB}" "$@"\n', a.dry_run)
+
+    print("\nDone. Say \"use coco\" in Claude Code or Codex, or run: coco doctor")
 
 
 if __name__ == "__main__":
