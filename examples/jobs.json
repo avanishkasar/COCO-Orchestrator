@@ -1,0 +1,6 @@
+[
+  {"label": "landscape", "role": "research", "task": "Find 5 open-source vector databases popular in 2026 with GitHub URLs and one-line positioning."},
+  {"label": "docs",      "role": "browse",   "task": "Read https://github.com/pgvector/pgvector and list index types and their limits."},
+  {"label": "arch",      "role": "bigread",  "cwd": ".", "task": "Summarise the architecture of this repository in 15 bullets. Do not modify files."},
+  {"label": "taglines",  "role": "local",    "task": "Write 5 taglines for a vector database comparison blog post."}
+]
