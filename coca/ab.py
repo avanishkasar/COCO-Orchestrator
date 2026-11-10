@@ -285,6 +285,24 @@ def cmd_statusline():
     print(" · ".join(parts))
 
 
+def cmd_remind():
+    """UserPromptSubmit hook: a short per-prompt reminder (plus Claude's real quota) so every session routes through COCO."""
+    try: sys.stdin.read()
+    except Exception: pass
+    if os.environ.get("COCO_WORKER"): return
+    left = ""
+    try:
+        rl = json.loads((HOME / "claude_status.json").read_text(encoding="utf-8")).get("rate_limits") or {}
+        w = rl.get("five_hour") or {}
+        if w.get("used_percentage") is not None and not (w.get("resets_at") and float(w["resets_at"]) < time.time()):
+            pct = 100 - float(w["used_percentage"])
+            left = f" Claude has {pct:.0f}% of its 5-hour limit left" + (", so delegate everything that isn't judgment." if pct < 30 else ".")
+    except Exception:
+        pass
+    print("COCO is on: send research, browsing, big reads, boilerplate code, first-pass reviews and bulk rewrites to "
+          "`coco run <role> \"task\"` (or `coco par`) instead of doing them yourself; read only the summary." + left)
+
+
 def cmd_guard(a):
     if a.action == "run": return guard_loop()
     if a.action == "off":
@@ -715,6 +733,7 @@ def main():
     sp.add_parser("doctor", help="send a tiny real task to every agent")
     sp.add_parser("credits", help="Claude usage ($) vs work done by workers")
     sp.add_parser("dash", help="animated live terminal dashboard")
+    sp.add_parser("remind", help="Claude Code UserPromptSubmit hook: per-prompt COCO reminder")
     sp.add_parser("statusline", help="Claude Code status line hook (captures real rate limits)")
     g = sp.add_parser("guard", help="keep the dashboard open while Claude sessions run: on | off | status")
     g.add_argument("action", nargs="?", default="status", choices=["on", "off", "status", "run"])
@@ -726,6 +745,8 @@ def main():
         sys.exit("COCO: you are a worker agent. Do the task yourself instead of delegating.")
     if a.cmd == "guard":
         return cmd_guard(a)
+    if a.cmd == "remind":
+        return cmd_remind()
     if a.cmd == "statusline":
         return cmd_statusline()
     if a.cmd == "dash":

@@ -69,6 +69,10 @@ def main():
         cmd = f"python {AB} up"
         if not any(h.get("command") == cmd for g in hooks for h in g.get("hooks", [])):
             hooks.append({"hooks": [{"type": "command", "command": cmd, "async": True, "timeout": 90}]})
+        ups = s["hooks"].setdefault("UserPromptSubmit", [])
+        rcmd = f"python {AB} remind"   # per-prompt nudge so every session actually routes through COCO
+        if not any(h.get("command") == rcmd for g in ups for h in g.get("hooks", [])):
+            ups.append({"hooks": [{"type": "command", "command": rcmd, "timeout": 10}]})
         if "statusLine" not in s:   # feeds Claude's real 5h/weekly limits to the dashboard
             s["statusLine"] = {"type": "command", "command": f"python {AB} statusline"}
         write(sp, json.dumps(s, indent=2) + "\n", a.dry_run)
