@@ -40,3 +40,6 @@ agy is slow (1–3 min); in tests codex gave the most precise reviews and resear
 - Workers must never push, publish, post, or touch credentials. Say so in the task if relevant.
 - The dashboard (Windows Terminal window "agentbus") auto-opens, auto-reopens while tasks run, and ollama auto-starts with the D:\DevCache model folder.
 
+
+## Spot-checks
+If a result ends with `⚠ SPOT-CHECK`, the summary may hide something (errors, failures, TODOs in the raw output). Read the raw output (`coco show <id>`) before relying on it.

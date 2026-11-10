@@ -33,6 +33,8 @@ Claude is the best planner and reviewer you have, and also the most expensive. M
 - 🛟 **Automatic fallback.** If an agent fails, hits a quota or is offline, the next one in the chain takes over.
 - 📡 **Live animated terminal dashboard**: packets fly between agents, every tool call is streamed, tasks show progress, and findings land on a shared board.
 - 💰 **Real credit accounting.** Claude's usage comes from Claude Code's own transcripts, and worker usage from the token counts each CLI reports. Nothing is estimated from character counts.
+- 🔎 **Automatic spot-checks.** If a worker's full output mentions errors, failures, TODOs or assumptions that its summary leaves out (or the summary is tiny next to a long output, or the task is in a random 10% sample), COCO flags it and Claude reads the raw output before trusting it.
+- 📉 **Quota-aware routing.** When an agent drops under 25% of its 5-hour limit (real numbers, from the agent itself), its work moves to the others first. Codex today; more as agents expose live limits.
 - 🧾 **Shared blackboard.** Every agent sees what the others found and adds its own durable findings.
 - 🔁 **Switch models anytime**, per agent and per role (`ab.py models set agy review claude-opus-4-6-thinking`).
 - 🔒 **Safe by default.** No auto-approve-everything modes, codex is sandboxed, read-only roles can't edit your project, and `local` tasks never leave your machine.
@@ -146,6 +148,8 @@ It won't close by accident. Ctrl+C is ignored while workers are running, and whi
 | `~/.agentbus/models.json` | Model per agent per role (edit with `ab.py models set`). |
 | `AB_DASH=0` | Don't auto-open the dashboard. |
 | `AB_TABS=1` | Also open a raw output tab for each worker. |
+| `COCO_LOW_QUOTA` | 5-hour quota % below which an agent is demoted (default 25). |
+| `COCO_SPOT_RATE` | Random share of tasks flagged for a raw-output check (default 0.1). |
 | `AGENTBUS_HOME` | Move the data folder (default `~/.agentbus`). |
 | `OLLAMA_MODELS` | Read when Ollama is auto-started. If a running Ollama can't see this folder, COCO restarts it with the right path. |
 

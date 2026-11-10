@@ -19,8 +19,8 @@ FPS = 14          # while agents work
 IDLE_FPS = 3      # nothing running: keep the CPU quiet
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ORB = "◐◓◑◒"
-COL = {"claude": "#ff8a4c", "codex": "#19c37d", "opencode": "#ffb020", "agy": "#4c8dff",
-       "ollama": "#b06cff", "board": "#5ee6ff", "err": "#ff5470"}
+COL = {"claude": "#e08a5e", "codex": "#4fbf8f", "opencode": "#d4a548", "agy": "#6f95e8",
+       "ollama": "#a385e0", "board": "#7fc6d6", "err": "#e5606f"}
 NAME = {"claude": "CLAUDE", "codex": "CODEX", "opencode": "OPENCODE", "agy": "ANTIGRAVITY",
         "ollama": "OLLAMA", "board": "BOARD"}
 ROLE_OF = {"claude": "planner · reviewer", "codex": "research · code · review", "opencode": "browse · simple · free",
@@ -29,10 +29,10 @@ POS = {"claude": (.50, .46), "codex": (.17, .16), "opencode": (.83, .16), "agy":
        "ollama": (.83, .80), "board": (.50, .86)}
 WORKERS = ["codex", "opencode", "agy", "ollama"]
 ICON = {"search": "⌕", "fetch": "⇣", "cmd": "❯", "edit": "✎", "read": "≡", "think": "∴", "text": "›",
-        "sys": "·", "error": "✖", "flow": "⇄", "board": "◆"}
+        "sys": "·", "error": "✕", "flow": "⇄", "board": "◆"}
 KSTYLE = {"search": "#7fd4ff", "fetch": "#7fd4ff", "cmd": "#e6e6e6", "edit": "#ffd36e", "read": "#b9c2d8",
-          "think": "italic #8f9bb8", "text": "#d6dcea", "sys": "italic #6b7590", "error": "bold #ff5470",
-          "flow": "bold #ffffff", "board": "#5ee6ff"}
+          "think": "italic #8f9bb8", "text": "#d6dcea", "sys": "italic #6b7590", "error": "#e5606f",
+          "flow": "#f4f6fa", "board": "#7fc6d6"}
 
 
 # ───────────────────────── event source ─────────────────────────
@@ -239,11 +239,16 @@ class State:
                 self.hit[e["agent"]] = (time.time() + .6, COL["err"])
                 if nx:
                     self.packet(e["agent"], nx, COL["err"], "fallback")
-                    self.log("claude", "flow", f"fallback {NAME.get(e['agent'])} ✖ → {NAME.get(nx, nx)}", e["id"])
+                    self.log("claude", "flow", f"fallback {NAME.get(e['agent'])} ✕ → {NAME.get(nx, nx)}", e["id"])
+            elif e["ev"] == "spotcheck":
+                self.log("claude", "error", f"spot-check {e['id']}: {'; '.join(e['why'])}", e["id"])
+                self.set_act("claude", "⚠ reading raw output")
+            elif e["ev"] == "reroute":
+                self.log("claude", "flow", f"quota-aware: {', '.join(e['low'])} low on 5h quota → moved to fallback", e["id"])
             elif e["ev"] == "done":
                 self.packet(e["agent"], "claude", COL.get(e["agent"], "#fff"), "summary", 1.6)
-                self.log(e["agent"], "flow", f"✔ summary → Claude ({e['sec']}s)", e["id"])
-                self.set_act(e["agent"], f"✔ done in {e['sec']}s")
+                self.log(e["agent"], "flow", f"✓ summary → Claude ({e['sec']}s)", e["id"])
+                self.set_act(e["agent"], f"✓ done in {e['sec']}s")
         elif e["type"] == "board":
             self.board.append({**e, "ts": time.time()})
             if not hist:
@@ -432,18 +437,18 @@ class Tasks:
             r = Text(no_wrap=True, overflow="ellipsis")
             if t["state"] == "running":
                 r.append(SPIN[f % len(SPIN)] + " ", style=f"bold {c}")
-                bar = "".join("▰" if (i - f // 2) % 10 in (0, 1, 2) else "▱" for i in range(10))
-                r.append(bar + " ", style=c)
-                r.append(f"{fmt_s(now - t.get('start', now)):>6} ", style="#ffffff")
+                for i in range(10):
+                    r.append("━", style=c if (i - f // 2) % 10 in (0, 1, 2) else "#2a3144")
+                r.append(f" {fmt_s(now - t.get('start', now)):>6} ", style="#f4f6fa")
             elif t["state"] == "done":
-                r.append("✔ ", style="bold #19c37d"); r.append("▰" * 10 + " ", style="#1e5c43")
-                r.append(f"{fmt_s(t.get('sec', 0)):>6} ", style="#7d88a3")
+                r.append("✓ ", style="#4fbf8f"); r.append("━" * 10, style="#39465e")
+                r.append(f" {fmt_s(t.get('sec', 0)):>6} ", style="#7d88a3")
             else:
-                r.append("✖ ", style="bold #ff5470"); r.append("▱" * 10 + " ", style="#5c1e2a"); r.append(f"{t['state']:>6} ", style="#ff5470")
-            for fl in t.get("fails", []): r.append(f"{fl}✖→", style="#ff5470")
+                r.append("✕ ", style=COL["err"]); r.append("━" * 10, style="#4a2730"); r.append(f" {t['state']:>6} ", style=COL["err"])
+            for fl in t.get("fails", []): r.append(f"{fl} ✕ → ", style="#9a4b55")
             r.append(f"{t['agent']:<8} ", style=f"bold {c}")
-            r.append(f"{t.get('role', ''):<8} ", style="#8fa0c0")
-            if t.get("tokens"): r.append(f"{t['tokens'] / 1000:>6.1f}k tok ", style="#5ee6ff")
+            r.append(f"{t.get('role', ''):<8} ", style="#717a92")
+            if t.get("tokens"): r.append(f"{t['tokens'] / 1000:>6.1f}k tok ", style="#c9cfdc")
             r.append(t.get("task", "").replace("\n", " "), style="#d6dcea")
             r.truncate(w, overflow="ellipsis")
             rows.append(r)
@@ -459,8 +464,8 @@ class Board:
         for b in list(reversed(self.st.board))[:h]:
             fresh = now - b["ts"] < 2.5
             r = Text(no_wrap=True, overflow="ellipsis")
-            r.append("◆ ", style=f"bold {COL.get(b['agent'], '#5ee6ff')}")
-            r.append(f"{NAME.get(b['agent'], b['agent'])[:8]:<9}", style=COL.get(b["agent"], "#5ee6ff"))
+            r.append("◆ ", style=COL.get(b['agent'], '#7fc6d6'))
+            r.append(f"{NAME.get(b['agent'], b['agent'])[:8]:<9}", style=COL.get(b["agent"], "#7fc6d6"))
             r.append(b["text"], style=("bold #ffffff on #123540" if fresh else "#c4cde0"))
             r.truncate(w, overflow="ellipsis")
             rows.append(r)
@@ -473,24 +478,22 @@ def header(st, wide=True):
     run = [t for t in st.all_tasks() if t["state"] == "running"]
     done = [t for t in real if t["state"] == "done"]
     t = Text(no_wrap=True, overflow="ellipsis")
-    t.append(f" {ORB[(f // 3) % 4]} ", style="bold #ff8a4c")
-    grad = ["#ff8a4c", "#ffb020", "#19c37d", "#5ee6ff", "#4c8dff", "#b06cff"]
-    for i, c in enumerate("C O C O"):
-        t.append(c, style=f"bold {grad[(i // 2 + f // 4) % len(grad)]}")
+    t.append(f" {ORB[(f // 3) % 4]} ", style="#8a93ab")
+    t.append("C O C O", style="bold #f4f6fa")
     t.append("  ")
     if wide: t.append("Claude orchestrating cheaper agents  ", style="#566079")
-    t.append(" ● LIVE " if f % 14 < 10 else "   LIVE ", style="bold #19c37d")
+    t.append(" ● LIVE " if f % 14 < 10 else "   LIVE ", style="#4fbf8f")
     cr = st.credits
-    stats = [("running", len(run), "#ffffff"), ("done", len(done), "#19c37d"),
-             ("failed", sum(1 for x in real if x["state"] == "failed"), "#ff5470")]
+    stats = [("running", len(run), "#f4f6fa"), ("done", len(done), "#c9cfdc"),
+             ("failed", sum(1 for x in real if x["state"] == "failed"), "#c9cfdc")]
     if cr:
-        stats += [("Claude today", f"${cr['claude_today']['usd']:.2f}", "#ff8a4c"),
-                  ("saved today", f"${cr['workers_today']['net_saved']:.2f}", "#19c37d")]
+        stats += [("Claude today", f"${cr['claude_today']['usd']:.2f}", "#f4f6fa"),
+                  ("saved today", f"${cr['workers_today']['net_saved']:.2f}", "#4fbf8f")]
     for name, v, c in stats:
-        t.append("  │  ", style="#2c3449"); t.append(str(v), style=f"bold {c}"); t.append(f" {name}", style="#6b7590")
+        t.append("  │  ", style="#2a3144"); t.append(str(v), style=f"bold {c}"); t.append(f" {name}", style="#717a92")
     note, until = st.notice
     if note and until > time.time():
-        t.append(f"   {note}", style="bold #ffb020 reverse" if f % 6 < 3 else "bold #ffb020")
+        t.append(f"   {note}", style="bold #d4a548")
     else:
         t.append(f"   {time.strftime('%H:%M:%S')}", style="#566079")
     return t
@@ -516,11 +519,11 @@ class Credits:
         share = lambda s, b: f"{100 * s / (s + b):.0f}%" if s + b > 0 else "—"
         rows = [
             hdr,
-            row("Claude burn", f"${ct['usd']:.2f}", f"${cs['usd']:.2f}", "bold #ff8a4c", "bold #ff8a4c"),
-            row("  tokens", cm.fmt_tok(tot(ct)), cm.fmt_tok(tot(cs)), "#c08060", "#c08060"),
-            row("Worker tokens", cm.fmt_tok(tot(wt)), cm.fmt_tok(tot(ws)), "#5ee6ff", "#5ee6ff"),
-            row("Saved (net)", f"${wt['net_saved']:.2f}", f"${ws['net_saved']:.2f}", "bold #19c37d", "bold #19c37d"),
-            row("Offload share", share(wt["net_saved"], ct["usd"]), share(ws["net_saved"], cs["usd"]), "bold #ffffff", "bold #ffffff"),
+            row("Claude burn", f"${ct['usd']:.2f}", f"${cs['usd']:.2f}", "bold #f4f6fa", "bold #f4f6fa"),
+            row("  tokens", cm.fmt_tok(tot(ct)), cm.fmt_tok(tot(cs)), "#8a93ab", "#8a93ab"),
+            row("Worker tokens", cm.fmt_tok(tot(wt)), cm.fmt_tok(tot(ws)), "#c9cfdc", "#c9cfdc"),
+            row("Saved (net)", f"${wt['net_saved']:.2f}", f"${ws['net_saved']:.2f}", "bold #4fbf8f", "bold #4fbf8f"),
+            row("Offload share", share(wt["net_saved"], ct["usd"]), share(ws["net_saved"], cs["usd"]), "bold #f4f6fa", "bold #f4f6fa"),
         ]
         ba = Text(no_wrap=True, overflow="ellipsis")
         for a, v in ws["by_agent"].items():
@@ -539,8 +542,8 @@ class Limits:
 
 def _bar(pct, n=8):
     full = int(round(min(100, max(0, pct)) / 100 * n))
-    col = "#19c37d" if pct < 60 else "#ffb020" if pct < 85 else "#ff5470"
-    return Text("█" * full, style=col) + Text("░" * (n - full), style="#2c3449")
+    col = "#c9cfdc" if pct < 75 else "#d4a548" if pct < 90 else "#e5606f"
+    return Text("━" * full, style=col) + Text("━" * (n - full), style="#2a3144")
 
 
 def _ago(t):
@@ -573,7 +576,7 @@ def limit_rows(L):
             try: passed = rs and float(rs) < time.time()
             except (TypeError, ValueError): passed = False
             if passed:
-                r.append("reset ✓  ", style="#19c37d"); continue
+                r.append("reset ✓  ", style="#4fbf8f"); continue
             r.append_text(_bar(pct, 6))
             r.append(f" {100 - pct:.0f}% left {_reset(rs)}  ", style="#c4cde0")
         out.append(r)
@@ -621,8 +624,8 @@ def build_layout(w, h):
     return lay, names
 
 
-def panel(r, title, color="#3b4563"):
-    return Panel(r, title=f"[bold #8a93ab]{title}[/]", title_align="left", border_style=color, box=box.ROUNDED, padding=(0, 1))
+def panel(r, title, color="#2e3548"):
+    return Panel(r, title=f"[bold #e4e7ee]{title}[/]", title_align="left", border_style=color, box=box.ROUNDED, padding=(0, 1))
 
 
 # ───────────────────────── main loop ─────────────────────────
@@ -698,13 +701,13 @@ def run(home: Path):
                     live.update(lay)
                     console.clear()
                 ups = {
-                    "head": lambda: Panel(header(st, size[0] >= 120), box=box.HEAVY, border_style="#2c3449", padding=(0, 0)),
+                    "head": lambda: Panel(header(st, size[0] >= 120), box=box.ROUNDED, border_style="#2e3548", padding=(0, 0)),
                     "net": lambda: panel(net, "AGENT NETWORK  " + "  ".join(
                         f"[{COL[w]}]●[/] {w}" if st.online.get(w) else f"[#3a4258]○ {w}[/]" for w in WORKERS)),
                     "feed": lambda: panel(feed, f"LIVE ACTIVITY  [#566079]{len(st.feed)} events[/]"),
                     "tasks": lambda: panel(tasks, "TASKS"),
-                    "credits": lambda: panel(cred, "CREDITS  [#566079]real tokens · $ at API list price[/]", "#5a4a2a"),
-                    "limits": lambda: panel(lim, "USAGE LEFT  [#566079]live, real sources only[/]", "#2f4a3a"),
+                    "credits": lambda: panel(cred, "CREDITS  [#5d667e]real tokens · $ at API list price[/]"),
+                    "limits": lambda: panel(lim, "USAGE LEFT  [#5d667e]live · drives routing[/]"),
                     "board": lambda: panel(board, f"SHARED BLACKBOARD  [#566079]{len(st.board)}[/]"),
                 }
                 for name in show:

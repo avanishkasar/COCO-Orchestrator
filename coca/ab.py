@@ -16,7 +16,7 @@ Communication:
 Claude only reads the short SUMMARY printed to stdout; details stay on disk.
 """
 import argparse, concurrent.futures as cf, datetime as dt, json, os, re, shutil
-import subprocess, sys, threading, time, urllib.request, uuid
+import random, subprocess, sys, threading, time, urllib.request, uuid
 from pathlib import Path
 
 HOME = Path(os.environ.get("AGENTBUS_HOME", Path.home() / ".agentbus"))
@@ -536,6 +536,49 @@ def agent_ollama(prompt, role, cwd, timeout, d, model):
 AGENTS = {"codex": agent_codex, "agy": agent_agy, "opencode": agent_opencode, "ollama": agent_ollama}
 
 
+LOW_QUOTA = float(os.environ.get("COCO_LOW_QUOTA", "25"))   # % of the 5-hour window left
+_QCACHE = {"t": 0, "v": {}}
+
+
+def five_hour_left():
+    """Real 5-hour quota left (%) per worker, only where the agent reports it (today: codex)."""
+    if time.time() - _QCACHE["t"] < 60: return _QCACHE["v"]
+    v = {}
+    try:
+        import limits
+        d = limits.codex()
+        for mins, used, resets in (d or {}).get("windows", []):
+            if mins == 300 and not (resets and float(resets) < time.time()):
+                v["codex"] = 100 - float(used)
+    except Exception:
+        pass
+    _QCACHE.update(t=time.time(), v=v)
+    return v
+
+
+def quota_order(chain):
+    """Agents under LOW_QUOTA % of their 5-hour window drop to the end of the chain (still usable as a last resort)."""
+    left = five_hour_left()
+    low = [a for a in chain if left.get(a, 100) < LOW_QUOTA]
+    return ([a for a in chain if a not in low] + low if low and len(low) < len(chain) else chain), low
+
+
+RISK_RE = re.compile(r"\b(error|errors|fail(?:ed|ure|s)?|exception|traceback|todo|fixme|not found|could ?n.t|unable|unverified|"
+                     r"warning|timed? ?out|denied|skipped|assum(?:e|ed|ption)|unclear|uncertain)\b", re.I)
+SPOT_RATE = float(os.environ.get("COCO_SPOT_RATE", "0.1"))   # random share of tasks flagged for a raw-output check
+
+
+def spot_check(out, summ):
+    """Flag summaries that may hide something: risk words in the full output that the summary never mentions,
+    a summary that is tiny next to a long output, or a random sample. Returns reasons (empty = looks fine)."""
+    why = []
+    hidden = sorted({m.lower() for m in RISK_RE.findall(out)} - {m.lower() for m in RISK_RE.findall(summ)})
+    if hidden: why.append("full output mentions " + ", ".join(hidden[:5]) + " but the summary doesn't")
+    if len(out) > 6000 and len(summ) < len(out) * 0.04: why.append(f"summary is {len(summ)} of {len(out)} chars")
+    if not why and random.random() < SPOT_RATE: why.append("random sample")
+    return why
+
+
 def summary_of(text, limit):
     m = re.search(r"##\s*SUMMARY\s*(.*?)(?:\n##\s|\Z)", text, re.S | re.I)
     s = (m.group(1) if m else text).strip()
@@ -548,8 +591,10 @@ def run_task(task, role="research", agent=None, cwd=None, timeout=900, limit=150
     d.mkdir(parents=True, exist_ok=True)
     prompt = wrap_prompt(role, task, tid)
     (d / "prompt.md").write_text(prompt, encoding="utf-8")
-    chain = [agent] if agent else ROUTES[role]
+    chain, low = ([agent], []) if agent else quota_order(ROUTES[role])
     cwd = str(Path(cwd or os.getcwd()).resolve())
+    if low and chain != ROUTES[role]:
+        emit({"ev": "reroute", "id": tid, "low": low, "left": {a: five_hour_left().get(a) for a in low}, "chain": chain})
     emit({"ev": "start", "id": tid, "role": role, "chain": chain, "cwd": cwd, "task": task[:200]})
     live_log(d).write_text(f"TASK {tid}  role={role}\n{task}\n", encoding="utf-8")
     CTX.d = d
@@ -581,6 +626,10 @@ def run_task(task, role="research", agent=None, cwd=None, timeout=900, limit=150
                 (d / "meta.json").write_text(json.dumps({"id": tid, "role": role, "agent": a, "model": m, "tried": tried,
                                                          "cwd": cwd, "task": task}, indent=2), encoding="utf-8")
                 summ = summary_of(out, limit)
+                why = spot_check(out, summ)
+                if why:
+                    emit({"ev": "spotcheck", "id": tid, "agent": a, "why": why})
+                    summ += "\n" + f"⚠ SPOT-CHECK: {'; '.join(why)}. Read the raw output before relying on this: coco show {tid}"
                 emit({"ev": "done", "id": tid, "agent": a, "model": m, "sec": dur, "usage": usage,
                       "returned_chars": len(summ)})
                 return {"id": tid, "agent": a, "ok": True, "summary": summ, "out": str(d / "out.md")}
