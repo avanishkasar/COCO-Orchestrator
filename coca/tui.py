@@ -4,7 +4,7 @@ Shows the agent network with packets flying between Claude, the workers and the 
 blackboard, a live activity log of exactly what each agent is doing, task progress, and the
 board. Data comes from ~/.agentbus (bus.jsonl, BOARD.md, tasks/*/live.log).
 """
-import datetime as dt, json, math, os, random, re, shutil, signal, threading, time, urllib.request
+import datetime as dt, json, math, os, random, re, shutil, signal, threading, time, traceback, urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -82,18 +82,27 @@ class Tail:
         w = s.strip()
         if st["pre"] or not w: return
         if w == "user": st["skip"] = True; return          # codex echoes the prompt: hide
-        if w in ("thinking", "codex", "exec"): st.update(skip=False, mode=w); return
+        if w in ("thinking", "codex", "exec"):
+            if st.get("hidden"):
+                out.append({"type": "log", "tid": tid, "agent": st["agent"], "kind": "sys", "text": f"… {st['hidden']} more output lines"})
+            st.update(skip=False, mode=w, n=0, hidden=0); return
         if st["skip"] or w.startswith(("--------", "OpenAI Codex v")): return
         kind = "sys" if (st["mode"] is None and re.match(r"^(workdir|model|provider|approval|sandbox|reasoning|session id):", w)) \
             else self.classify(w, st["mode"])
+        if st["mode"] == "exec":                          # a command's output: show the first lines, count the rest
+            st["n"] = st.get("n", 0) + 1
+            if st["n"] > 3:
+                st["hidden"] = st.get("hidden", 0) + 1; return
         out.append({"type": "log", "tid": tid, "agent": st["agent"], "kind": kind, "text": w[:300]})
 
     def poll(self):
         out, hist = [], self.first
         if self.BUS.exists() and self.BUS.stat().st_size > self.bus_off:
-            with open(self.BUS, encoding="utf-8") as f:
-                f.seek(self.bus_off); data = f.read(); self.bus_off = f.tell()
-            for e in self._lines(data):
+            with open(self.BUS, "rb") as f:
+                f.seek(self.bus_off); raw = f.read()
+            cut = raw.rfind(b"\n") + 1                # a half-written last line is left for the next poll
+            self.bus_off += cut
+            for e in self._lines(raw[:cut].decode("utf-8", "replace")):
                 self._track(e); out.append({"type": "bus", **e})
         if self.BOARD.exists() and self.BOARD.stat().st_size > self.board_off:
             with open(self.BOARD, encoding="utf-8") as f:
@@ -131,8 +140,9 @@ class Tail:
                 t = tasks.setdefault(e["id"], {"id": e["id"], "state": "running", "fails": [], "agent": "?"})
                 ts = dt.datetime.fromisoformat(e["t"]).timestamp()
                 if e["ev"] == "start":
-                    t.update(role=e["role"], task=e["task"], chain=e["chain"], agent=e["chain"][0], start=ts)
+                    t.update(role=e["role"], task=e["task"], chain=e["chain"], agent=e["chain"][0], start=ts, tier=e.get("tier", ""))
                 elif e["ev"] == "fail":
+                    if e.get("retry_alt"): continue          # same agent retries on its alternate model
                     t["fails"].append(e["agent"])
                     nxt = [a for a in t.get("chain", []) if a not in t["fails"]]
                     if nxt: t["agent"] = nxt[0]
@@ -142,9 +152,12 @@ class Tail:
                     t.update(state="done", agent=e["agent"], sec=e["sec"], model=e.get("model", ""),
                              tokens=u.get("in", 0) + u.get("out", 0) + u.get("cache_read", 0))
                 elif e["ev"] == "attempt":
-                    t["model"] = e.get("model", "")
+                    t["model"] = e.get("model", ""); t["agent"] = e.get("agent", t["agent"])
         for t in tasks.values():
-            if t["state"] == "running" and time.time() - t.get("start", 0) > 3600: t["state"] = "stale"
+            if t["state"] != "running" or time.time() - t.get("start", 0) < 120: continue
+            try: quiet = time.time() - (self.TASKS / t["id"] / "live.log").stat().st_mtime
+            except OSError: quiet = 1e9
+            if quiet > 1800: t["state"] = "stale"       # nothing written for 30 min: its dispatcher is gone
         return list(tasks.values())
 
     def tokens(self, tid, cache={}):
@@ -182,6 +195,8 @@ class State:
     limits = None
 
     def __init__(self):
+        self.down = {}                          # agent -> why it is unavailable (from the last health check)
+        self.last_pulse = {}
         self.feed = deque(maxlen=400)
         self.packets, self.sparks = [], []
         self.hit, self.act = {}, {}            # node -> until ; node -> (text, t0)
@@ -218,6 +233,10 @@ class State:
             if not hist and e["kind"] != "sys":
                 self.spark(a, 1 if e["kind"] in ("text", "think") else 3)
                 self.set_act(a, f"{ICON.get(e['kind'], '›')} {e['text']}")
+                now = time.time()                     # every bit of work sends a small pulse back to Claude
+                if a in WORKERS and now - self.last_pulse.get(a, 0) > .6 and len(self.packets) < 24:
+                    self.last_pulse[a] = now
+                    self.packet(a, "claude", COL[a], "", .9)
         elif e["type"] == "bus" and e.get("ev") == "attempt":
             self.model[e["agent"]] = e.get("model", "")
             if not hist:
@@ -226,7 +245,7 @@ class State:
             if not hist:
                 self.log("claude", "sys", f"{e['name']} {e['state']}" + (f" · {len(e.get('models', []))} models" if e.get("models") is not None else ""))
         elif e["type"] == "bus" and not hist:
-            if e["ev"] == "start":
+            if e["ev"] == "start" and e.get("chain"):
                 a = e["chain"][0]
                 self.packet("claude", a, COL.get(a, "#fff"), e["role"])
                 self.log("claude", "flow", f"dispatch → {NAME.get(a, a)} [{e['role']}] {e['task']}", e["id"])
@@ -244,7 +263,8 @@ class State:
                 self.log("claude", "error", f"spot-check {e['id']}: {'; '.join(e['why'])}", e["id"])
                 self.set_act("claude", "⚠ reading raw output")
             elif e["ev"] == "reroute":
-                self.log("claude", "flow", f"quota-aware: {', '.join(e['low'])} low on 5h quota → moved to fallback", e["id"])
+                why = e.get("why") or {a: "low on 5h quota" for a in e.get("low", [])}
+                self.log("claude", "flow", "smart routing: " + "; ".join(f"{a} moved back ({r})" for a, r in why.items()), e["id"])
             elif e["ev"] == "done":
                 self.packet(e["agent"], "claude", COL.get(e["agent"], "#fff"), "summary", 1.6)
                 self.log(e["agent"], "flow", f"✓ summary → Claude ({e['sec']}s)", e["id"])
@@ -274,12 +294,63 @@ def fmt_s(s):
 
 
 class Network:
-    BW, BH = 24, 5
+    """Agent map. Roomy panels get boxes joined by animated links; small panels get one row per agent."""
+    BH = 5
+    SLOT = {"codex": (0, 0), "opencode": (1, 0), "agy": (0, 1), "ollama": (1, 1)}   # column, row
 
     def __init__(self, st: State): self.st = st
 
     def __rich_console__(self, console, options):
-        w, h = options.max_width, max(10, (options.height or 22))
+        w, h = max(1, options.max_width), max(1, options.height or 22)
+        running = [t for t in self.st.all_tasks() if t["state"] == "running"]
+        if w < 62 or h < 17:
+            yield self.compact(w, h, running)
+        else:
+            yield self.full(w, h, running)
+
+    # ── shared bits ──
+    def status(self, k, running, now):
+        st = self.st
+        mine = [t for t in running if t["agent"] == k]
+        if k == "claude":
+            return (f"waiting on {len(running)} worker{'s' * (len(running) != 1)}" if running else "idle · saving credits"), bool(running)
+        if not st.online.get(k, True):
+            return st.down.get(k) or "offline", False
+        if mine:
+            return f"▶ {mine[0].get('role', '')} {fmt_s(now - mine[0].get('start', now))}" + (f" +{len(mine) - 1}" if len(mine) > 1 else ""), True
+        m = (st.model.get(k) or "").split("/")[-1].split(":")[0]
+        return ("ready · " + m if m and m != "default" else "ready · " + ROLE_OF[k]), False
+
+    def compact(self, w, h, running):
+        st, now, f = self.st, time.time(), self.st.frame
+        busy = {t["agent"] for t in running}
+        rows = []
+        for k in ["claude"] + WORKERS:
+            txt, active = self.status(k, running, now)
+            off = k in WORKERS and not st.online.get(k, True)
+            r = Text(no_wrap=True, overflow="ellipsis")
+            r.append((SPIN[f % len(SPIN)] if active else ("○" if off else "●")) + " ", style="#5a6378" if off else f"bold {COL[k]}")
+            r.append(f"{NAME[k]:<12}", style="#5a6378" if off else f"bold {COL[k]}")
+            if k in WORKERS:                              # a little link back to Claude that flows while busy
+                for i in range(6):
+                    on = k in busy and (i - f // 2) % 6 < 2
+                    r.append("━" if k in busy else "·", style=(f"bold {COL[k]}" if on else ("#39465e" if k in busy else "#2a3144")))
+                r.append(" ")
+            else:
+                r.append(" " * 7)
+            r.append(txt, style="#f4f6fa" if active else "#7d88a3")
+            act = st.act.get(k)
+            if act and not off and now - act[1] < 30:
+                r.append("  " + act[0], style="#8a93ab")
+            rows.append(r)
+        if h > len(rows):
+            r = Text(no_wrap=True, overflow="ellipsis")
+            r.append("● ", style=COL["board"]); r.append(f"{'BOARD':<12}", style=f"bold {COL['board']}")
+            r.append(" " * 7 + f"{len(st.board)} shared findings", style="#7d88a3")
+            rows.append(r)
+        return Group(*rows[:h])
+
+    def full(self, w, h, running):
         st, now, f = self.st, time.time(), self.st.frame
         ch = [[" "] * w for _ in range(h)]
         sty = [[None] * w for _ in range(h)]
@@ -287,12 +358,19 @@ class Network:
         def put(x, y, c, s):
             if 0 <= x < w and 0 <= y < h: ch[y][x] = c; sty[y][x] = s
 
-        bw = min(self.BW, max(16, w // 4))
-        C = {k: (int(px * (w - 1)), int(py * (h - 1))) for k, (px, py) in POS.items()}
-        running = [t for t in st.all_tasks() if t["state"] == "running"]
+        bw, bh = max(18, min(30, (w - 8) // 3)), self.BH
+        rect = {"claude": ((w - bw) // 2, (h - bh) // 2, bw, bh)}
+        for k, (cx, cy) in self.SLOT.items():
+            rect[k] = (1 if cx == 0 else w - bw - 1, 0 if cy == 0 else h - bh, bw, bh)
+        gap = w - 2 * bw - 6                              # room between the two bottom boxes for the board
+        if gap >= 14:
+            bbw = min(bw, gap)
+            rect["board"] = ((w - bbw) // 2, h - 3, bbw, 3)
+        C = {k: (x + ww // 2, y + hh // 2) for k, (x, y, ww, hh) in rect.items()}
+        C.setdefault("board", (w // 2, h - 2))
         busy = {t["agent"] for t in running}
 
-        # edges
+        # links: dim dots when idle; a bright line with pulses running out from Claude while that agent works
         paths = {}
         for wk in WORKERS:
             paths[("claude", wk)] = bres(*C["claude"], *C[wk])
@@ -304,37 +382,40 @@ class Network:
             off = wk in WORKERS and not st.online.get(wk, True)
             for i, (x, y) in enumerate(pts):
                 if live:
-                    on = (i - f) % 4 == 0
-                    put(x, y, "•" if on else "·", f"bold {COL[wk]}" if on else COL[wk])
-                else:
-                    put(x, y, "·", "#2a3147" if off else "#3b4563")
+                    ph = (i - f) % 8
+                    put(x, y, "●" if ph == 0 else ("•" if ph in (1, 2) else "·"),
+                        f"bold {COL[wk]}" if ph < 3 else COL[wk])
+                elif a == "claude":
+                    put(x, y, "·", "#232a3b" if off else "#39465e")
+                elif i % 2 == 0:
+                    put(x, y, "·", "#232a3b")
 
-        # packets
+        # packets travelling between nodes (dispatch, summary, finding, fallback, activity)
         keep = []
         for p in st.packets:
+            if p["a"] not in C or p["b"] not in C: continue
             q = (now - p["t0"]) / p["dur"]
             if q >= 1:
                 st.hit[p["b"]] = (now + .35, p["color"]); continue
             keep.append(p)
             pts = paths.get((p["a"], p["b"])) or (paths[(p["b"], p["a"])][::-1] if (p["b"], p["a"]) in paths
                                                    else bres(*C[p["a"]], *C[p["b"]]))
-            if p["a"] in WORKERS and p["b"] in WORKERS:  # fallback hop worker→worker
+            if p["a"] in WORKERS and p["b"] in WORKERS:   # fallback hop worker → worker
                 for x, y in pts: put(x, y, "·", COL["err"])
             e = q * q * (3 - 2 * q)
             i = int(e * (len(pts) - 1))
-            for k, c in enumerate("●•∙·"):
-                j = i - k * 2 if k else i
-                if 0 <= j < len(pts): put(*pts[j], c, f"bold {p['color']}" if k == 0 else p["color"])
+            for k, c in enumerate("●●•∙·"):
+                j = i - k
+                if 0 <= j < len(pts): put(*pts[j], c, f"bold {p['color']}" if k < 2 else p["color"])
             x, y = pts[i]
             for k, c in enumerate(p["label"][:12]):
                 put(x + 2 + k, y - 1, c, f"bold {p['color']}")
         st.packets = keep
 
-        # sparks
         keep = []
         for s in st.sparks:
             q = (now - s["t0"]) / s["dur"]
-            if q >= 1: continue
+            if q >= 1 or s["node"] not in C: continue
             keep.append(s)
             cx, cy = C[s["node"]]
             r = bw // 2 + 1 + q * 4
@@ -342,47 +423,39 @@ class Network:
                 COL[s["node"]] if q < .6 else "#4a5470")
         st.sparks = keep
 
-        # nodes
-        for k, (cx, cy) in C.items():
-            nbw = bw if k != "board" else max(18, bw - 2)
-            bh = self.BH if k != "board" else 3
-            x0, y0 = max(0, min(w - nbw, cx - nbw // 2)), max(0, min(h - bh, cy - bh // 2))
+        # nodes (drawn last so they sit on top of the links)
+        for k, (x0, y0, nbw, nbh) in rect.items():
             col = COL[k]
             off = k in WORKERS and not st.online.get(k, True)
-            is_busy = (k in busy) or (k == "claude" and running)
+            txt, active = ("", False) if k == "board" else self.status(k, running, now)
             hit = st.hit.get(k)
             flash = hit and hit[0] > now
-            base = "#3a4258" if off else (f"bold {col}" if is_busy else col)
-            if flash: base = f"bold {hit[1]} reverse"
-            perim = [(x0 + i, y0) for i in range(nbw)] + [(x0 + nbw - 1, y0 + j) for j in range(1, bh)] + \
-                    [(x0 + nbw - 1 - i, y0 + bh - 1) for i in range(1, nbw)] + [(x0, y0 + bh - 1 - j) for j in range(1, bh - 1)]
+            base = "#3a4258" if off else (f"bold {col}" if active else col)
+            if flash: base = f"bold {hit[1]}"
+            perim = [(x0 + i, y0) for i in range(nbw)] + [(x0 + nbw - 1, y0 + j) for j in range(1, nbh)] + \
+                    [(x0 + nbw - 1 - i, y0 + nbh - 1) for i in range(1, nbw)] + [(x0, y0 + nbh - 1 - j) for j in range(1, nbh - 1)]
             for idx, (x, y) in enumerate(perim):
-                c = "─" if y in (y0, y0 + bh - 1) else "│"
+                c = "─" if y in (y0, y0 + nbh - 1) else "│"
                 if (x, y) == (x0, y0): c = "╭"
                 elif (x, y) == (x0 + nbw - 1, y0): c = "╮"
-                elif (x, y) == (x0, y0 + bh - 1): c = "╰"
-                elif (x, y) == (x0 + nbw - 1, y0 + bh - 1): c = "╯"
+                elif (x, y) == (x0, y0 + nbh - 1): c = "╰"
+                elif (x, y) == (x0 + nbw - 1, y0 + nbh - 1): c = "╯"
                 s = base
-                if is_busy and not flash and (idx - f * 2) % len(perim) < 5: s = "bold #ffffff"
+                if active and not flash and (idx - f * 2) % len(perim) < 6: s = "bold #ffffff"   # light running round the box
                 put(x, y, c, s)
-            for yy in range(y0 + 1, y0 + bh - 1):
+            for yy in range(y0 + 1, y0 + nbh - 1):
                 for xx in range(x0 + 1, x0 + nbw - 1): put(xx, yy, " ", None)
             inner = nbw - 4
-            spin = SPIN[f % len(SPIN)] if is_busy else ("○" if off else "●")
+            spin = SPIN[f % len(SPIN)] if active else ("○" if off else "●")
             title = f"{spin} {NAME[k]}"
             for i, c in enumerate(title[:inner]): put(x0 + 2 + i, y0 + 1, c, f"bold {col}" if not off else "#5a6378")
             if k == "board":
-                txt = f"{len(st.board)} shared"
-                if len(title) + 1 + len(txt) <= inner:
-                    for i, c in enumerate(txt): put(x0 + nbw - 2 - len(txt) + i, y0 + 1, c, "#8fa0c0")
+                t2 = f"{len(st.board)} shared"
+                if len(title) + 1 + len(t2) <= inner:
+                    for i, c in enumerate(t2): put(x0 + nbw - 2 - len(t2) + i, y0 + 1, c, "#8fa0c0")
                 continue
-            mine = [t for t in running if t["agent"] == k]
-            if k == "claude":
-                status = f"waiting on {len(running)} worker{'s' * (len(running) != 1)}" if running else "idle · saving credits"
-            elif off: status = "offline"
-            elif mine: status = f"▶ {mine[0].get('role', '')} {fmt_s(now - mine[0].get('start', now))}" + (f" +{len(mine) - 1}" if len(mine) > 1 else "")
-            else: status = (st.model.get(k) or ROLE_OF[k]).split("/")[-1].split(":")[0]
-            for i, c in enumerate(status[:inner]): put(x0 + 2 + i, y0 + 2, c, "#ffffff" if mine or (k == "claude" and running) else "#7d88a3")
+            if len(txt) > inner: txt = txt[:inner - 1] + "…"
+            for i, c in enumerate(txt): put(x0 + 2 + i, y0 + 2, c, "#f4f6fa" if active else "#7d88a3")
             act = st.act.get(k)
             if act and not off:
                 shown = act[0][: min(inner, int((now - act[1]) * 70))]
@@ -390,14 +463,14 @@ class Network:
 
         lines = []
         for y in range(h):
-            t, run, cur = Text(), "", sty[y][0]
+            t, run, cur = Text(no_wrap=True), "", sty[y][0]
             for x in range(w):
                 if sty[y][x] != cur:
                     t.append(run, style=cur); run, cur = "", sty[y][x]
                 run += ch[y][x]
             t.append(run, style=cur)
             lines.append(t)
-        yield Text("\n").join(lines)
+        return Text("\n").join(lines)
 
 
 class Feed:
@@ -448,6 +521,8 @@ class Tasks:
             for fl in t.get("fails", []): r.append(f"{fl} ✕ → ", style="#9a4b55")
             r.append(f"{t['agent']:<8} ", style=f"bold {c}")
             r.append(f"{t.get('role', ''):<8} ", style="#717a92")
+            if t["state"] == "running" and t.get("model") and w > 70:
+                r.append(f"{t['model'].split('/')[-1].split(':')[0][:20]} ", style="#8a93ab")
             if t.get("tokens"): r.append(f"{t['tokens'] / 1000:>6.1f}k tok ", style="#c9cfdc")
             r.append(t.get("task", "").replace("\n", " "), style="#d6dcea")
             r.truncate(w, overflow="ellipsis")
@@ -593,7 +668,7 @@ def limit_rows(L):
 def build_layout(w, h):
     """Pick a layout for the current terminal size. Returns (layout, visible panel names)."""
     lay = Layout()
-    if w >= 110 and h >= 28:                          # full
+    if w >= 112 and h >= 28:                          # full
         foot = 11 if h >= 34 else 9
         lay.split_column(Layout(name="head", size=3), Layout(name="body", ratio=1), Layout(name="foot", size=foot))
         lay["body"].split_row(Layout(name="net", ratio=3), Layout(name="right", ratio=2))
@@ -601,18 +676,21 @@ def build_layout(w, h):
         lay["foot"].split_row(Layout(name="tasks", ratio=5), Layout(name="credits", minimum_size=44, ratio=3), Layout(name="board", ratio=4))
         return lay, {"head", "net", "feed", "limits", "tasks", "credits", "board"}
     if w >= 76 and h >= 22:                           # medium: no blackboard
-        body = Layout(name="body", ratio=1) if w >= 96 else Layout(name="feed", ratio=1)
-        lay.split_column(Layout(name="head", size=3), body, Layout(name="limits", size=5), Layout(name="foot", size=9))
-        if w >= 96:
-            lay["body"].split_row(Layout(name="net", ratio=1), Layout(name="feed", ratio=1)); names = {"net", "feed"}
+        if w >= 134:
+            lay.split_column(Layout(name="head", size=3), Layout(name="body", ratio=1), Layout(name="limits", size=5), Layout(name="foot", size=9))
+            lay["body"].split_row(Layout(name="net", ratio=1), Layout(name="feed", ratio=1))
         else:
-            names = {"feed"}
+            lay.split_column(Layout(name="head", size=3), Layout(name="net", size=8), Layout(name="feed", ratio=1),
+                             Layout(name="limits", size=5), Layout(name="foot", size=9))
+        names = {"net", "feed"}
         lay["foot"].split_row(Layout(name="tasks", ratio=1), Layout(name="credits", size=42))
         return lay, names | {"head", "limits", "tasks", "credits"}
     # narrow / short: stack what fits
     parts, names = [Layout(name="head", size=3)], {"head"}
-    if h >= 34:
-        parts.append(Layout(name="net", ratio=2)); names.add("net")
+    if h >= 40 and w >= 66:
+        parts.append(Layout(name="net", size=19)); names.add("net")      # room for the full map
+    elif h >= 16:
+        parts.append(Layout(name="net", size=8)); names.add("net")       # one row per agent
     parts.append(Layout(name="feed", ratio=3, minimum_size=4)); names.add("feed")
     if h >= 18:
         parts.append(Layout(name="tasks", size=7)); names.add("tasks")
@@ -633,14 +711,14 @@ def run(home: Path):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import credits as cm
-    os.environ.pop("NO_COLOR", None)
+    for k in ("NO_COLOR", "COLUMNS", "LINES"): os.environ.pop(k, None)   # never inherit a fixed size or "no colour"
     console = Console(force_terminal=True, color_system="truecolor")
     tail, st = Tail(home), State()
     st.board = tail.board_lines()
     hb = home / "dash.heartbeat"
     size, lay, show = None, None, set()
     net, feed, tasks, board, cred, lim = Network(st), Feed(st), Tasks(st), Board(st), Credits(st), Limits(st)
-    last_poll = last_tasks = last_online = 0
+    last_poll = last_tasks = last_online = errs = 0
     last_ctrl_c = [0.0]
 
     def on_sigint(*_):
@@ -671,7 +749,19 @@ def run(home: Path):
 
     def online_loop():
         while True:
-            st.online = agents_online(); time.sleep(20)
+            try:
+                on, down = agents_online(), {}
+                try: h = json.loads((home / "health.json").read_text(encoding="utf-8"))
+                except Exception: h = {}
+                for a, v in h.items():
+                    if a in on and not v.get("ok") and time.time() - v.get("t", 0) < 1800:
+                        on[a] = False; down[a] = "down · " + (v.get("note") or "health check failed")
+                for a in on:
+                    if not on[a] and a not in down: down[a] = "not installed" if a != "ollama" else "not running"
+                st.online, st.down = on, down
+            except Exception:
+                pass
+            time.sleep(10)
     threading.Thread(target=credits_loop, daemon=True).start()
     threading.Thread(target=online_loop, daemon=True).start()
     threading.Thread(target=limits_loop, daemon=True).start()
@@ -687,12 +777,17 @@ def run(home: Path):
                 now = time.time()
                 st.frame += 1
                 if now - last_poll > .25:
-                    for e in tail.poll(): st.handle(e)
+                    try:
+                        for e in tail.poll(): st.handle(e)
+                    except Exception:
+                        with open(home / "dash.err", "a", encoding="utf-8") as ef: ef.write(traceback.format_exc() + "\n")
                     last_poll = now
                     try: hb.write_text(str(now))
                     except OSError: pass
                 if now - last_tasks > 1:
-                    st.tasks = tail.tasks()[-60:]
+                    try: st.tasks = tail.tasks()[-60:]
+                    except Exception:
+                        with open(home / "dash.err", "a", encoding="utf-8") as ef: ef.write(traceback.format_exc() + "\n")
                     last_tasks = now
                 cur = (console.size.width, console.size.height)
                 if cur != size:                       # terminal resized: re-flow the panels
@@ -710,9 +805,23 @@ def run(home: Path):
                     "limits": lambda: panel(lim, "USAGE LEFT  [#5d667e]live · drives routing[/]"),
                     "board": lambda: panel(board, f"SHARED BLACKBOARD  [#566079]{len(st.board)}[/]"),
                 }
-                for name in show:
-                    lay[name].update(ups[name]())
-                live.refresh()
+                try:
+                    if size[0] < 30 or size[1] < 8:
+                        live.update(Text(f"COCO · {sum(t['state'] == 'running' for t in st.tasks)} running · enlarge the window", style="bold #f4f6fa"))
+                    else:
+                        if live.renderable is not lay: live.update(lay)
+                        for name in show:
+                            lay[name].update(ups[name]())
+                    live.refresh()
+                    errs = 0
+                except Exception as ex:                 # log it, show it, keep going
+                    errs += 1
+                    try:
+                        with open(home / "dash.err", "a", encoding="utf-8") as ef:
+                            ef.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {size} {traceback.format_exc()}\n")
+                    except OSError: pass
+                    st.notice = (f"render error: {type(ex).__name__} (see ~/.agentbus/dash.err)", time.time() + 6)
+                    if errs > 3: lay, show = build_layout(*size); live.update(lay); console.clear(); errs = 0
                 busy = st.packets or any(t["state"] == "running" for t in st.tasks)
                 time.sleep(1 / FPS if busy else 1 / IDLE_FPS)
     except KeyboardInterrupt:

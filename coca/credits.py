@@ -88,6 +88,7 @@ def _scan_workers(home: Path):
     for line in bus.read_text(encoding="utf-8").splitlines():
         try: e = json.loads(line)
         except ValueError: continue
+        if str(e.get("id", "")).startswith(("warm-", "doctor-")): continue   # health pings are not "work saved"
         if e.get("ev") in ("done", "fail") and isinstance(e.get("usage"), dict) and isinstance(e.get("t"), str) and e.get("agent"):
             u = e["usage"]
             rows.append({"day": e["t"][:10], "agent": e["agent"], "ok": e["ev"] == "done", "in": u.get("in", 0),

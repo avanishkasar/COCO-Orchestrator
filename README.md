@@ -33,6 +33,8 @@ Claude is the best planner and reviewer you have, and also the most expensive. M
 - 🛟 **Automatic fallback.** If an agent fails, hits a quota or is offline, the next one in the chain takes over.
 - 📡 **Live animated terminal dashboard**: packets fly between agents, every tool call is streamed, tasks show progress, and findings land on a shared board.
 - 💰 **Real credit accounting.** Claude's usage comes from Claude Code's own transcripts, and worker usage from the token counts each CLI reports. Nothing is estimated from character counts.
+- 🎚️ **Smart model selection.** Every task gets a tier (light / standard / heavy / max) from its role and what it asks for, and each agent runs the matching model: Codex uses `gpt-6-luna` for light work, `gpt-6.1-sol` for real work and `gpt-6-astra` only for hard code and reviews. A model you pin with `models set` always wins.
+- 🩺 **Self-healing routing.** All four agents are started and pinged when a session opens. An agent that fails its health check, keeps failing tasks or is low on quota moves to the back of the chain until it passes again.
 - 🔎 **Automatic spot-checks.** If a worker's full output mentions errors, failures, TODOs or assumptions that its summary leaves out (or the summary is tiny next to a long output, or the task is in a random 10% sample), COCO flags it and Claude reads the raw output before trusting it.
 - 📉 **Quota-aware routing.** When an agent drops under 25% of its 5-hour limit (real numbers, from the agent itself), its work moves to the others first. Codex today; more as agents expose live limits.
 - 🧾 **Shared blackboard.** Every agent sees what the others found and adds its own durable findings.

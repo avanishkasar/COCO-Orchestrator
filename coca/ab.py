@@ -88,17 +88,34 @@ def load_conf():
     return conf
 
 
-def model_for(agent, role, override=None):
-    if override: return override
-    c = load_conf().get(agent, {})
-    m = c.get(role, c.get("default", ""))
-    if agent == "ollama" and m in ("", "auto"):
-        tags = ollama_tags() or []
-        for pref in OLLAMA_PREF:
-            hit = [t for t in tags if pref in t.lower()]
-            if hit: return hit[0]
-        return tags[0] if tags else ""
-    return m
+def user_conf():
+    """Only what the user set with `coco models set` (these always beat smart selection)."""
+    try: return json.loads(CONF.read_text(encoding="utf-8")) if CONF.exists() else {}
+    except ValueError: return {}
+
+
+def ollama_pick(small=False):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=1.5) as r:
+            ms = json.loads(r.read())["models"]
+    except Exception:
+        return ""
+    if not ms: return ""
+    if small: return min(ms, key=lambda m: m.get("size", 0))["name"]
+    for pref in OLLAMA_PREF:
+        hit = [m["name"] for m in ms if pref in m["name"].lower()]
+        if hit: return hit[0]
+    return ms[0]["name"]
+
+
+def model_for(agent, role, override=None, tier="standard"):
+    """Returns (model, tier used). Smart selection by task tier unless the user pinned a model."""
+    import smart
+    if override: return override, "manual"
+    m, used = smart.pick_model(agent, role, tier, user_conf(), five_hour_left().get(agent))
+    if agent == "ollama" and m in ("", "auto", "auto-small"):
+        m = ollama_pick(small=(m == "auto-small"))
+    return m, used
 
 
 # ───────────────────────── ollama autostart ─────────────────────────
@@ -160,7 +177,7 @@ def open_tab(title, color, command):
     if os.name != "nt" or not wt: return
     shell = shutil.which("pwsh.exe") or "powershell.exe"
     try:
-        env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "COCO_WORKER")}
+        env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "COCO_WORKER", "COLUMNS", "LINES")}
         subprocess.Popen([wt, "-w", "coco", "new-tab", "--title", title, "--tabColor", color,
                           "--suppressApplicationTitle", shell, "-NoLogo", "-NoExit", "-Command", command],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
@@ -240,12 +257,7 @@ def guard_alive():
 
 def start_guard():
     if guard_alive() or not DASH: return False
-    py = Path(sys.executable)
-    pyw = py.with_name("pythonw.exe")
-    exe = str(pyw if os.name == "nt" and pyw.exists() else py)
-    kw = {"creationflags": NO_WINDOW | DETACHED | NEW_GROUP} if os.name == "nt" else {"start_new_session": True}
-    subprocess.Popen([exe, str(Path(__file__).resolve()), "guard", "run"], stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+    detach(["guard", "run"])
     return True
 
 
@@ -373,13 +385,14 @@ def tool_line(name, params):
     return f"{n} {short(p)}"
 
 
-def run_cli(cmd, prompt, cwd, timeout, stdin=True, transform=None, model=""):
+def run_cli(cmd, prompt, cwd, timeout, stdin=True, transform=None, model="", first_out=None):
     """Run a worker CLI, stream readable lines to live.log, collect final text + token usage."""
     d, agent = CTX.d, CTX.agent
     lf = open(live_log(d), "a", encoding="utf-8", buffering=1)
     lf.write(f"\n━━━━ {agent} starting in {cwd} ━━━━\n")
     if model: lf.write(f"model: {model}\n")
-    st = {"final": [], "usage": CTX.usage, "buf": ""}
+    st = {"final": [], "usage": CTX.usage, "buf": "", "settled": None, "cut": False}
+    CTX.st = st
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          encoding="utf-8", errors="replace", cwd=cwd, env={**os.environ, "COCO_WORKER": "1"})
@@ -389,6 +402,7 @@ def run_cli(cmd, prompt, cwd, timeout, stdin=True, transform=None, model=""):
         prev = ""
         for line in stream:
             bufs[key].append(line)
+            if key == "out": st["seen"] = True
             if key == "out" and transform:
                 for disp in transform(line, st) or []:
                     lf.write(disp.rstrip("\n") + "\n")
@@ -406,13 +420,27 @@ def run_cli(cmd, prompt, cwd, timeout, stdin=True, transform=None, model=""):
     if stdin:
         try: p.stdin.write(prompt); p.stdin.close()
         except OSError: pass
-    try:
-        rc = p.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    def kill_tree():
         if os.name == "nt": subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
         else: p.kill()
-        rc = 124
-        bufs["err"].append(f"\nTIMEOUT after {timeout}s\n")
+
+    t_start = time.time()
+    deadline = t_start + timeout
+    while True:
+        try:
+            rc = p.wait(timeout=0.5); break
+        except subprocess.TimeoutExpired:
+            pass
+        if time.time() > deadline:
+            kill_tree(); rc = 124
+            bufs["err"].append(f"\nTIMEOUT after {timeout}s\n"); break
+        if first_out and not st.get("seen") and time.time() - t_start > first_out:
+            kill_tree(); rc = 124
+            bufs["err"].append(f"\nNO OUTPUT after {first_out}s (service not responding)\n"); break
+        # the agent has delivered its answer but its process is not exiting (seen with OpenCode): stop waiting
+        if st.get("settled") and time.time() - st["settled"] > 6:
+            kill_tree(); rc = 0
+            lf.write(f"{agent} finished its answer but did not exit; stopped it\n"); break
     for t in ts: t.join(timeout=5)
     if st["buf"].strip(): lf.write(st["buf"].strip() + "\n")
     lf.write(f"━━━━ {agent} exited rc={rc} ━━━━\n")
@@ -435,8 +463,10 @@ def agent_codex(prompt, role, cwd, timeout, d, model):
     c = load_conf()["codex"]
     last = d / "codex_last.txt"
     sandbox = "workspace-write" if role in WRITE_ROLES else "read-only"
+    effort = c.get("effort_" + role, c.get("effort", "medium"))
+    if "@" in (model or ""): model, effort = model.split("@", 1)      # smart tiers carry "model@effort"
     cmd = [exe, "exec", "--skip-git-repo-check", "-s", sandbox, "-o", str(last),
-           "-c", f'model_reasoning_effort="{c.get("effort_" + role, c.get("effort", "medium"))}"']
+           "-c", f'model_reasoning_effort="{effort}"']
     if role in ("research", "browse"): cmd += ["-c", "tools.web_search=true"]
     if model: cmd += ["-m", model]
     cmd += ["-"]
@@ -503,6 +533,7 @@ def opencode_transform(line, st):
     try: e = json.loads(line)
     except ValueError: return [line] if line.strip() else []
     t, p = e.get("type"), e.get("part") or {}
+    if t in ("step_start", "tool_use", "text"): st["settled"] = None        # still working
     if t == "tool_use":
         stt = p.get("state") or {}
         return [tool_line(p.get("tool"), stt.get("input") or p.get("input"))]
@@ -510,10 +541,15 @@ def opencode_transform(line, st):
         st["final"].append(p["text"])
         return [l for l in p["text"].splitlines() if l.strip()][:12]
     if t == "step_finish":
+        if p.get("reason") != "tool-calls": st["settled"] = time.time()
         tk = p.get("tokens") or {}
         add_usage(st["usage"], tk.get("input"), tk.get("output"), (tk.get("cache") or {}).get("read"),
                   (tk.get("cache") or {}).get("write"), tk.get("reasoning"))
     if t == "error":
+        if "".join(st["final"]).strip():       # the connection dropped after text arrived: keep it, but say so
+            st["settled"], st["cut"] = time.time(), True
+        else:
+            st["settled"] = time.time() + 20       # nothing usable: allow ~25 s for a retry, then give up
         return [f"error {short(e.get('error') or p)}"]
     return []
 
@@ -521,10 +557,11 @@ def opencode_transform(line, st):
 def agent_opencode(prompt, role, cwd, timeout, d, model):
     exe = which("opencode")
     if not exe: raise FileNotFoundError("opencode")
-    cmd = [exe, "run", "--format", "json", "-f", str(d / "prompt.md")]
+    # --standalone: a private server per task, so a stuck OpenCode background service can never hang a task
+    cmd = [exe, "run", "--standalone", "--format", "json", "-f", str(d / "prompt.md")]
     if model: cmd += ["-m", model]
     cmd += ["Do the task in the attached prompt.md exactly."]
-    return run_cli(cmd, None, cwd, timeout, stdin=False, transform=opencode_transform, model=model)
+    return run_cli(cmd, None, cwd, timeout, stdin=False, transform=opencode_transform, model=model, first_out=60)
 
 
 def agent_ollama(prompt, role, cwd, timeout, d, model):
@@ -603,27 +640,42 @@ def summary_of(text, limit):
     return s if len(s) <= limit else s[:limit] + " …[truncated]"
 
 
-def run_task(task, role="research", agent=None, cwd=None, timeout=900, limit=1500, label=None, model=None):
+ROLE_TIMEOUT = {"simple": 240, "local": 420, "browse": 420, "research": 900, "bigread": 900, "code": 1500, "review": 900}
+
+
+def run_task(task, role="research", agent=None, cwd=None, timeout=None, limit=1500, label=None, model=None, tier=None):
+    import smart
     tid = (label or role)[:12] + "-" + uuid.uuid4().hex[:6]
     d = TASKS / tid
     d.mkdir(parents=True, exist_ok=True)
     prompt = wrap_prompt(role, task, tid)
     (d / "prompt.md").write_text(prompt, encoding="utf-8")
-    chain, low = ([agent], []) if agent else quota_order(ROUTES[role])
+    timeout = timeout or ROLE_TIMEOUT.get(role, 900)
+    tier = tier or smart.tier_for(role, task)
+    chain, why = ([agent], {}) if agent else smart.smart_order(ROUTES[role], HOME, five_hour_left())
     cwd = str(Path(cwd or os.getcwd()).resolve())
-    if low and chain != ROUTES[role]:
-        emit({"ev": "reroute", "id": tid, "low": low, "left": {a: five_hour_left().get(a) for a in low}, "chain": chain})
-    emit({"ev": "start", "id": tid, "role": role, "chain": chain, "cwd": cwd, "task": task[:200]})
-    live_log(d).write_text(f"TASK {tid}  role={role}\n{task}\n", encoding="utf-8")
+    if why:
+        emit({"ev": "reroute", "id": tid, "low": list(why), "why": why, "chain": chain})
+    emit({"ev": "start", "id": tid, "role": role, "chain": chain, "cwd": cwd, "task": task[:200], "tier": tier})
+    live_log(d).write_text(f"TASK {tid}  role={role}  tier={tier}\n{task}\n", encoding="utf-8")
     CTX.d = d
     if DASH: ensure_dashboard()
     if "ollama" in chain: ensure_ollama()
     tried = []
+    # every agent gets its tier model; on a non-quota failure the same agent gets one more try on its alternate model
+    plan = []
+    for a in chain:
+        m, used = model_for(a, role, model if agent else None, tier)
+        plan.append((a, m, used, False))
+        alt = smart.ALT_MODEL.get(a)
+        if alt and used not in ("manual", "user") and alt != m: plan.append((a, alt, "alt", True))
+    skip_alt = set()
     with Watchdog():
-        for a in chain:
-            CTX.agent, CTX.usage = a, {}
-            m = model_for(a, role, model if agent else None)
-            emit({"ev": "attempt", "id": tid, "agent": a, "model": m or "default"})
+        for a, m, used, is_alt in plan:
+            if is_alt and a not in skip_alt: continue      # alternate only runs right after its agent failed
+            skip_alt.discard(a)
+            CTX.agent, CTX.usage, CTX.st = a, {}, {}
+            emit({"ev": "attempt", "id": tid, "agent": a, "model": m or "default", "tier": used})
             if TABS:
                 open_tab(f"{a} · {tid}", TAB_COLOR.get(a, "#888888"),
                          f"Get-Content -Wait -Tail 200 -Encoding utf8 '{live_log(d)}'")
@@ -645,13 +697,17 @@ def run_task(task, role="research", agent=None, cwd=None, timeout=900, limit=150
                                                          "cwd": cwd, "task": task}, indent=2), encoding="utf-8")
                 summ = summary_of(out, limit)
                 why = spot_check(out, summ)
+                if getattr(CTX, "st", {}).get("cut"):
+                    why.insert(0, f"{a}'s connection dropped at the end of its answer, so it may be incomplete")
                 if why:
                     emit({"ev": "spotcheck", "id": tid, "agent": a, "why": why})
                     summ += "\n" + f"⚠ SPOT-CHECK: {'; '.join(why)}. Read the raw output before relying on this: coco show {tid}"
                 emit({"ev": "done", "id": tid, "agent": a, "model": m, "sec": dur, "usage": usage,
                       "returned_chars": len(summ)})
                 return {"id": tid, "agent": a, "ok": True, "summary": summ, "out": str(d / "out.md")}
-            emit({"ev": "fail", "id": tid, "agent": a, "model": m, "rc": rc, "usage": usage,
+            quota = bool(QUOTA_RE.search(err[-2000:]))
+            if not is_alt and not quota and rc != 124: skip_alt.add(a)   # worth one retry on the alternate model
+            emit({"ev": "fail", "id": tid, "agent": a, "model": m, "rc": rc, "usage": usage, "retry_alt": a in skip_alt,
                   "err": (err.strip() or out.strip())[-300:]})
     (d / "meta.json").write_text(json.dumps({"id": tid, "role": role, "tried": tried, "task": task}, indent=2), encoding="utf-8")
     return {"id": tid, "agent": None, "ok": False, "summary": "ALL AGENTS FAILED: " + json.dumps(tried), "out": str(d / "raw.log")}
@@ -670,10 +726,14 @@ def cmd_models(a):
         CONF.write_text(json.dumps(cur, indent=2), encoding="utf-8")
         print(f"{a.agent}.{a.role} = {a.model}")
         return
-    print("CURRENT (agent: role -> model)")
-    for ag, c in conf.items():
-        print(f"  {ag:9} " + "  ".join(f"{k}={v or 'cli-default'}" for k, v in c.items()))
-    print("  ollama    auto ->", model_for("ollama", "simple"))
+    import smart
+    print("SMART TIERS (picked per task: light / standard / heavy / max)")
+    for ag, t in smart.TIERS.items():
+        print(f"  {ag:9} " + "  ".join(f"{k}={v}" for k, v in t.items()))
+    print("  ollama    auto ->", ollama_pick(), "| auto-small ->", ollama_pick(True))
+    print("PINNED BY YOU (these beat smart selection; remove from ~/.agentbus/models.json to unpin)")
+    for ag, c in user_conf().items():
+        print(f"  {ag:9} " + "  ".join(f"{k}={v}" for k, v in c.items()))
     if a.action == "list":
         print("\nAVAILABLE")
         tags = ensure_ollama() or []
@@ -690,13 +750,68 @@ def cmd_models(a):
         print("  codex     uses your ChatGPT plan's default model (override: ab.py models set codex default <model>)")
 
 
+def detach(args):
+    """Run `ab.py <args>` as a hidden background process that outlives this one."""
+    py = Path(sys.executable)
+    pyw = py.with_name("pythonw.exe")
+    exe = str(pyw if os.name == "nt" and pyw.exists() else py)
+    kw = {"creationflags": NO_WINDOW | DETACHED | NEW_GROUP} if os.name == "nt" else {"start_new_session": True}
+    env = {k: v for k, v in os.environ.items() if k not in ("NO_COLOR", "COCO_WORKER", "COLUMNS", "LINES")}
+    subprocess.Popen([exe, str(Path(__file__).resolve()), *args], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, **kw)
+
+
+WARM_TTL = float(os.environ.get("COCO_WARM_HOURS", "6")) * 3600
+
+
+def warm(force=False):
+    """Start every agent for real: Ollama is launched and its model loaded into memory; Codex, Antigravity and
+    OpenCode each answer a tiny ping (re-done at most every COCO_WARM_HOURS), so a broken agent is known up front."""
+    import smart
+    lock = HOME / "warm.lock"
+    if lock.exists() and time.time() - lock.stat().st_mtime < 300: return {}
+    lock.write_text(str(os.getpid()))
+    h, res = smart.health(HOME), {}
+
+    def one(ag):
+        try:
+            if ag == "ollama":
+                if ensure_ollama() is None: return False, "not installed or failed to start"
+                m = ollama_pick()
+                if not m: return False, "no model installed"
+                body = json.dumps({"model": m, "keep_alive": "30m"}).encode()   # empty prompt = just load the model
+                req = urllib.request.Request("http://127.0.0.1:11434/api/generate", body, {"Content-Type": "application/json"})
+                urllib.request.urlopen(req, timeout=180).read()
+                return True, f"{m} loaded"
+            if not which(ag): return False, "CLI not installed"
+            old = h.get(ag)
+            if old and old["ok"] and time.time() - old["t"] < WARM_TTL and not force:
+                return True, old.get("note", "")
+            r = run_task("Reply with exactly: ready", "simple", ag, None, 240, 200, f"warm-{ag}", tier="light")
+            return r["ok"], ("ready" if r["ok"] else r["summary"][-180:])
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    try:
+        with cf.ThreadPoolExecutor(4) as ex:
+            futs = {ag: ex.submit(one, ag) for ag in AGENTS}
+            for ag, f in futs.items():
+                ok, note = f.result()
+                res[ag] = (ok, note)
+                smart.set_health(HOME, ag, ok, note)
+        emit({"ev": "service", "name": "agents", "state": "warmed: " + ", ".join(f"{a} {'ok' if v[0] else 'DOWN'}" for a, v in res.items())})
+    finally:
+        lock.unlink(missing_ok=True)
+    return res
+
+
 def cmd_up(a):
     print("dashboard :", "opened" if ensure_dashboard() else "already open")
     print("guard     :", "started" if start_guard() else ("running" if guard_alive() else "off (AB_DASH=0)"))
-    tags = ensure_ollama()
-    print("ollama    :", "DOWN" if tags is None else f"up, models={tags}")
-    for ag in ("codex", "agy", "opencode"):
+    for ag in ("codex", "agy", "opencode", "ollama"):
         print(f"{ag:10}:", which(ag) or "MISSING")
+    detach(["warm"])
+    print("agents    : starting all four in the background (see the dashboard)")
 
 
 def cmd_doctor(a):
@@ -718,7 +833,8 @@ def main():
     r.add_argument("-a", "--agent", choices=AGENTS)
     r.add_argument("-m", "--model", help="model override (needs -a)")
     r.add_argument("-C", "--cwd")
-    r.add_argument("-t", "--timeout", type=int, default=900)
+    r.add_argument("-t", "--timeout", type=int, help="seconds (default depends on the role)")
+    r.add_argument("--tier", choices=["light", "standard", "heavy", "max"], help="force a model tier (default: picked from the task)")
     r.add_argument("-n", "--limit", type=int, default=1500, help="max summary chars printed")
     p = sp.add_parser("par", help="parallel tasks from JSON: [{role, task, agent?, model?, cwd?, label?}]")
     p.add_argument("file"); p.add_argument("-j", "--jobs", type=int, default=4)
@@ -729,7 +845,8 @@ def main():
     m = sp.add_parser("models", help="show / list / set models per agent and role")
     m.add_argument("action", nargs="?", default="show", choices=["show", "list", "set"])
     m.add_argument("agent", nargs="?"); m.add_argument("role", nargs="?"); m.add_argument("model", nargs="?")
-    sp.add_parser("up", help="start everything: dashboard + ollama, check CLIs")
+    sp.add_parser("up", help="start everything: dashboard, guard, and all four agents")
+    w = sp.add_parser("warm", help="start/ping every agent now"); w.add_argument("--force", action="store_true")
     sp.add_parser("doctor", help="send a tiny real task to every agent")
     sp.add_parser("credits", help="Claude usage ($) vs work done by workers")
     sp.add_parser("dash", help="animated live terminal dashboard")
@@ -757,12 +874,12 @@ def main():
         return print(credits.report_text(HOME))
     if a.cmd == "run":
         task = Path(a.task[1:]).read_text(encoding="utf-8") if a.task.startswith("@") else a.task
-        print(fmt(run_task(task, a.role, a.agent, a.cwd, a.timeout, a.limit, model=a.model)))
+        print(fmt(run_task(task, a.role, a.agent, a.cwd, a.timeout, a.limit, model=a.model, tier=a.tier)))
     elif a.cmd == "par":
         jobs = json.loads(Path(a.file).read_text(encoding="utf-8"))
         with cf.ThreadPoolExecutor(a.jobs) as ex:
             futs = [ex.submit(run_task, j["task"], j.get("role", "research"), j.get("agent"), j.get("cwd"),
-                              j.get("timeout", 900), a.limit, j.get("label"), j.get("model")) for j in jobs]
+                              j.get("timeout"), a.limit, j.get("label"), j.get("model"), j.get("tier")) for j in jobs]
             for f in futs: print(fmt(f.result()), end="\n\n")
     elif a.cmd == "show":
         d = TASKS / a.id
@@ -778,6 +895,8 @@ def main():
         cmd_models(a)
     elif a.cmd == "up":
         cmd_up(a)
+    elif a.cmd == "warm":
+        for ag, (ok, note) in warm(a.force).items(): print(f"{ag:9} {'OK  ' if ok else 'DOWN'} {note}")
     elif a.cmd == "doctor":
         cmd_doctor(a)
 
